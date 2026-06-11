@@ -1,0 +1,7 @@
+# Arduino build/temporales
+build/
+bin/
+layout.ui.cfg
+# Archivos de configuración de sistemas operativos
+.DS_Store
+Thumbs.db

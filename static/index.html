@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>Simulador - Auto Unificado</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+  <!-- ÁREA DE SIMULACIÓN (siempre visible) -->
+  <div id="canvas-container">
+    <div id="canvas-holder"></div>
+
+    <!-- Overlay de herramientas de escena (abajo del canvas) -->
+    <div id="scene-overlay">
+      <span class="scene-tag">🛤️ ESCENA</span>
+      <button class="tool active" data-tool="line" title="Dibujar línea negra">✏️ Línea</button>
+      <button class="tool" data-tool="erase" title="Borrar pista">⬜ Borrar</button>
+      <button class="tool" data-tool="rect" title="Obstáculo rectangular (arrastrar)">▭ Caja</button>
+      <button class="tool" data-tool="circle" title="Obstáculo redondo (arrastrar)">⬤ Tacho</button>
+      <button class="tool" data-tool="robot" title="Arrastrar el auto · rueda del mouse = rotar">🚗 Auto</button>
+      <span class="brush-ctl">Grosor <input id="brush" type="range" min="6" max="48" value="22"><b id="brush-val">22</b></span>
+      <button class="ovl-btn" id="saveScene" title="Guardar escena en el navegador">💾</button>
+      <button class="ovl-btn danger" id="clearScene" title="Limpiar pista y obstáculos">🗑️</button>
+    </div>
+  </div>
+
+  <!-- PANEL LATERAL -->
+  <div id="side-panel">
+    <h1>Simulador Auto Unificado</h1>
+
+    <div class="ip-badge" id="ipBadge" title="Click para copiar — esta es la dirección que va en la aplicación del celular (en vez de la IP del Arduino)">
+      📶 IP para la app: <code id="ipUrl">detectando…</code> <span class="ip-copy">⧉</span>
+    </div>
+
+    <!-- Controles principales -->
+    <div class="controls">
+      <button id="btnPlay" title="Compilar el sketch y ejecutar">▶ Ejecutar</button>
+      <button id="btnPause" class="stop-btn">⏸ Pausa</button>
+      <button id="btnReset" class="refresh-btn">↺ Restart</button>
+    </div>
+
+    <!-- Pestañas del panel -->
+    <div class="panel-tabs">
+      <button class="ptab active" data-tab="code">📝 Código</button>
+      <button class="ptab" data-tab="manual">🎮 Manual</button>
+      <button class="ptab" data-tab="config">⚙️ Config</button>
+    </div>
+
+    <!-- ======== TAB: CÓDIGO ======== -->
+    <div id="tab-code" class="ptab-pane active">
+      <div id="errPanel" class="err-panel" style="display:none"></div>
+
+      <div class="editor-wrapper">
+        <div class="editor-header">📝 mi_robot.ino <span class="editor-hint">— pegá tu sketch completo, igual que en el Arduino IDE</span></div>
+        <div class="editor-body">
+          <div id="gutter" class="gutter"></div>
+          <textarea id="editor" spellcheck="false"></textarea>
+        </div>
+      </div>
+
+      <div class="api-reference">
+        <strong>⚙️ Cómo funciona</strong><br><br>
+        <div class="api-block">
+          Escribí el sketch <em>completo</em> (con <code>setup()</code> y <code>loop()</code>).
+          El mismo código anda acá y en el <strong>Arduino UNO R4 WiFi</strong> con <code>WiFiS3.h</code>.
+        </div>
+        <div class="api-block">
+          <strong>📡 El simulador entiende:</strong><br>
+          <code>server.available()</code> — te entrega el request HTTP recibido<br>
+          <code>analogWrite(IN1..IN4, pwm)</code> — mueve las ruedas<br>
+          <code>pulseIn(echo, HIGH, t)</code> — distancia ultrasónica<br>
+          <code>analogRead(A0..)</code> — sensor infrarrojo (0–1023)<br>
+          <code>Serial.print()</code> · <code>millis()</code> · <code>delay()</code>
+        </div>
+        <div class="api-block">
+          <strong>🔌 Pines:</strong> los <code>#define</code>/<code>const</code> de motores y sensores
+          tienen que coincidir con la pestaña <strong>⚙️ Config</strong>.
+        </div>
+      </div>
+    </div>
+
+    <!-- ======== TAB: MANUAL ======== -->
+    <div id="tab-manual" class="ptab-pane">
+      <div class="hint-box" style="margin:0 0 10px 0">
+        🎮 Mandá comandos HTTP al auto. <strong>Flechas</strong> o <strong>joystick</strong> —
+        cambia lo que se envía. Editá las rutas para que coincidan con tu sketch.
+      </div>
+      <div id="manual-panel"></div>
+    </div>
+
+    <!-- ======== TAB: CONFIG ======== -->
+    <div id="tab-config" class="ptab-pane">
+      <div class="hint-box" style="margin:0 0 10px 0">
+        ⚙️ Pines y nombres de tu auto. Se guarda en <code>config/config.json</code> —
+        exportalo para llevarlo a otra compu.
+      </div>
+      <div id="config-panel"></div>
+    </div>
+
+    <!-- Monitor serial (siempre visible) -->
+    <div class="serial-wrapper">
+      <div class="serial-header">
+        <span>🖥️ Monitor Serial</span>
+        <span id="lastReq" class="last-req" title="Último request HTTP recibido">—</span>
+      </div>
+      <pre id="serial" class="serial"></pre>
+    </div>
+  </div>
+
+  <script src="/static/transpiler.js"></script>
+  <script src="/static/arduino-shim.js"></script>
+  <script src="/static/sim.js"></script>
+  <script src="/static/control.js"></script>
+  <script src="/static/config-ui.js"></script>
+  <script src="/static/starter.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

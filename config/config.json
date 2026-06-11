@@ -1,0 +1,47 @@
+{
+  "comando": {
+    "varName": "request"
+  },
+  "infrarrojo": {
+    "cantidad": 0,
+    "sensores": [],
+    "umbralDefault": 500,
+    "umbralVar": "umbral"
+  },
+  "motores": {
+    "pins": {
+      "IN1": 5,
+      "IN2": 6,
+      "IN3": 10,
+      "IN4": 11
+    },
+    "velocidadDefault": 120,
+    "velocidadVar": "velocidad"
+  },
+  "parametros": {
+    "velAvanzar": 50,
+    "velGiro": 210
+  },
+  "ultrasonido": {
+    "sensores": [
+      {
+        "echoPin": 8,
+        "rol": "frontal",
+        "trigPin": 9,
+        "varName": "sensor_frontal"
+      },
+      {
+        "echoPin": 13,
+        "rol": "izquierdo",
+        "trigPin": 12,
+        "varName": "sensor_izquierdo"
+      },
+      {
+        "echoPin": 4,
+        "rol": "derecho",
+        "trigPin": 7,
+        "varName": "sensor_derecho"
+      }
+    ]
+  }
+}
