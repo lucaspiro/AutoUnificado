@@ -3,10 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <title>Simulador - Auto Unificado</title>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+  <!-- p5.js LOCAL: el simulador anda sin internet -->
+  <script src="/static/vendor/p5.min.js"></script>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
@@ -18,10 +16,12 @@
     <!-- Overlay de herramientas de escena (abajo del canvas) -->
     <div id="scene-overlay">
       <span class="scene-tag">🛤️ ESCENA</span>
-      <button class="tool active" data-tool="line" title="Dibujar línea negra">✏️ Línea</button>
-      <button class="tool" data-tool="erase" title="Borrar pista">⬜ Borrar</button>
-      <button class="tool" data-tool="rect" title="Obstáculo rectangular (arrastrar)">▭ Caja</button>
-      <button class="tool" data-tool="circle" title="Obstáculo redondo (arrastrar)">⬤ Tacho</button>
+      <button class="tool active" data-tool="line" title="Dibujar línea negra a mano alzada (trazo continuo)">✏️ Línea</button>
+      <button class="tool" data-tool="sline" title="Línea RECTA: click donde empieza, arrastrá hasta donde termina, soltá">📏 Recta</button>
+      <button class="tool" data-tool="erase" title="Borrar: pista o un obstáculo entero">⬜ Borrar</button>
+      <button class="tool" data-tool="rect" title="Obstáculo rectangular (arrastrar y soltar)">▭ Caja</button>
+      <button class="tool" data-tool="circle" title="Obstáculo redondo (arrastrar y soltar)">⬤ Tacho</button>
+      <button class="tool" data-tool="poly" title="Dibujá el contorno a mano alzada: al soltar se cierra y se rellena como obstáculo">✏️ Forma</button>
       <button class="tool" data-tool="robot" title="Arrastrar el auto · rueda del mouse = rotar">🚗 Auto</button>
       <span class="brush-ctl">Grosor <input id="brush" type="range" min="6" max="48" value="22"><b id="brush-val">22</b></span>
       <button class="ovl-btn" id="saveScene" title="Guardar escena en el navegador">💾</button>
@@ -63,25 +63,6 @@
         </div>
       </div>
 
-      <div class="api-reference">
-        <strong>⚙️ Cómo funciona</strong><br><br>
-        <div class="api-block">
-          Escribí el sketch <em>completo</em> (con <code>setup()</code> y <code>loop()</code>).
-          El mismo código anda acá y en el <strong>Arduino UNO R4 WiFi</strong> con <code>WiFiS3.h</code>.
-        </div>
-        <div class="api-block">
-          <strong>📡 El simulador entiende:</strong><br>
-          <code>server.available()</code> — te entrega el request HTTP recibido<br>
-          <code>analogWrite(IN1..IN4, pwm)</code> — mueve las ruedas<br>
-          <code>pulseIn(echo, HIGH, t)</code> — distancia ultrasónica<br>
-          <code>analogRead(A0..)</code> — sensor infrarrojo (0–1023)<br>
-          <code>Serial.print()</code> · <code>millis()</code> · <code>delay()</code>
-        </div>
-        <div class="api-block">
-          <strong>🔌 Pines:</strong> los <code>#define</code>/<code>const</code> de motores y sensores
-          tienen que coincidir con la pestaña <strong>⚙️ Config</strong>.
-        </div>
-      </div>
     </div>
 
     <!-- ======== TAB: MANUAL ======== -->

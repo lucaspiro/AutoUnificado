@@ -42,42 +42,55 @@ estado = {
     "ts": 0.0,       # timestamp de cuando llego
 }
 
-# Config por defecto: se usa si todavia no existe config/config.json
+# Config por defecto: solo hardware (que sensor/motor esta en que pin).
+# Velocidades, umbrales y variables viven en el codigo, como en el Arduino.
 CONFIG_DEFAULT = {
-    "comando": {"varName": "request"},
     "motores": {
         "pins": {"IN1": 5, "IN2": 6, "IN3": 10, "IN4": 11},
-        "velocidadVar": "velocidad",
-        "velocidadDefault": 120,
     },
     "ultrasonido": {
         "sensores": [
-            {"rol": "frontal",   "varName": "sensor_frontal",   "trigPin": 9,  "echoPin": 8},
-            {"rol": "izquierdo", "varName": "sensor_izquierdo", "trigPin": 12, "echoPin": 13},
-            {"rol": "derecho",   "varName": "sensor_derecho",   "trigPin": 7,  "echoPin": 4},
+            {"rol": "frontal",   "trigPin": 9,  "echoPin": 8},
+            {"rol": "izquierdo", "trigPin": 12, "echoPin": 13},
+            {"rol": "derecho",   "trigPin": 7,  "echoPin": 4},
         ]
     },
     "infrarrojo": {
-        "cantidad": 2,
         "sensores": [
-            {"rol": "izq", "varName": "lectura_izq", "pin": "A0"},
-            {"rol": "der", "varName": "lectura_der", "pin": "A1"},
+            {"rol": "izq", "pin": "A0"},
+            {"rol": "der", "pin": "A1"},
         ],
-        "umbralVar": "umbral",
-        "umbralDefault": 500,
+        "lecturaBlanco": 100,
+        "lecturaNegro": 900,
     },
-    "parametros": {"velAvanzar": 50, "velGiro": 210},
 }
 
 
-# Puerto del server. Si la app del celular asume puerto 80 (como el Arduino
-# real), correr:  python app.py 80
-PORT = 5000
+# Puerto del server. Default 80 (igual que el Arduino real: la app usa la IP
+# pelada, sin puerto). Si el 80 esta ocupado cae solo a 5000.
+# Se puede forzar otro:  python app.py 8080   (o variable de entorno PORT)
+PORT = 80
+PORT_FALLBACK = 5000
+if os.environ.get("PORT"):
+    try:
+        PORT = int(os.environ["PORT"])
+    except ValueError:
+        pass
 if len(sys.argv) > 1:
     try:
         PORT = int(sys.argv[1])
     except ValueError:
         pass
+
+
+def _puerto_disponible(port):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("0.0.0.0", port))
+        s.close()
+        return True
+    except OSError:
+        return False
 
 
 def _ip_local():
@@ -135,7 +148,7 @@ def sim_info():
     return jsonify({
         "ip": ip,
         "port": PORT,
-        "url": "http://" + ip + ":" + str(PORT),
+        "url": _url(ip, PORT),
     })
 
 
@@ -229,15 +242,35 @@ def root_post():
     return comando("")
 
 
+def _url(ip, port):
+    # En puerto 80 el navegador no muestra el puerto, igual que el Arduino.
+    if port == 80:
+        return "http://" + ip
+    return "http://" + ip + ":" + str(port)
+
+
 if __name__ == "__main__":
     os.makedirs(CONFIG_DIR, exist_ok=True)
     if not os.path.exists(CONFIG_PATH):
         _guardar_config(CONFIG_DEFAULT)
-    ip = _ip_local()
-    print("=" * 52)
-    print("  Simulador Auto Unificado")
-    print("  En esta PC:     http://localhost:%d" % PORT)
-    print("  Desde la app:   http://%s:%d" % (ip, PORT))
-    print("  (la IP que va en la aplicacion del celular)")
-    print("=" * 52)
+
+    if os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+        # Proceso hijo del reloader: hereda el socket ya bindeado del padre.
+        # NO re-chequear el puerto (lo veria "ocupado" por su propio padre);
+        # adoptar el que decidio el padre.
+        PORT = int(os.environ.get("AUTOSIM_PORT", PORT))
+    else:
+        if not _puerto_disponible(PORT):
+            print("AVISO: puerto %d ocupado, usando %d" % (PORT, PORT_FALLBACK))
+            PORT = PORT_FALLBACK
+        os.environ["AUTOSIM_PORT"] = str(PORT)
+
+        ip = _ip_local()
+        print("=" * 52)
+        print("  Simulador Auto Unificado")
+        print("  En esta PC:     " + _url("localhost", PORT))
+        print("  Desde la app:   " + _url(ip, PORT))
+        print("  (la IP que va en la aplicacion del celular)")
+        print("=" * 52, flush=True)
+
     app.run(host="0.0.0.0", port=PORT, debug=True)

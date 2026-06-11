@@ -11,7 +11,7 @@ pip install flask
 python app.py
 ```
 
-Abrí <http://localhost:5000>.
+Abrí <http://localhost>.
 
 ## Qué hace
 
@@ -54,13 +54,13 @@ En `static/ejemplos/` hay dos sketches REALES de alumnos que andan pegados tal c
 - `ejemplo_flechas.ino` — control por rutas (`/adelante`, `/atras`...) + modo automático.
 - `ejemplo_joystick.ino` — control por joystick (`/?X=..&Y=..`) + modo obstáculo.
 
-También accesibles desde el navegador: `http://localhost:5000/static/ejemplos/ejemplo_flechas.ino`.
+También accesibles desde el navegador: `http://localhost/static/ejemplos/ejemplo_flechas.ino`.
 
 ## Probar el modo manual desde afuera
 
 ```bash
-curl http://localhost:5000/adelante
-curl "http://localhost:5000/?X=120&Y=0"
+curl http://localhost/adelante
+curl "http://localhost/?X=120&Y=0"
 ```
 
 El simulador reacciona aunque el comando venga de otra máquina o del celular.

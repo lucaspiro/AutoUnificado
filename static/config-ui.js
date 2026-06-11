@@ -1,9 +1,9 @@
 /* =========================================================================
- * config-ui.js  —  Pestana de configuracion.
+ * config-ui.js  —  Pestana de configuracion (solo hardware).
  *
- * Edita nombres de variables, pines y velocidades/umbrales. Guarda en el
- * backend (config/config.json, transportable). Exporta / importa JSON.
- * Al aplicar, reconfigura el simulador (pines -> ruedas/sensores).
+ * Identifica QUE sensor/motor esta en QUE pin — igual que el cableado real.
+ * Todo lo demas (velocidades, umbrales, variables) vive en el codigo, como
+ * en el Arduino. Se guarda en config/config.json (exportable / importable).
  * ========================================================================= */
 window.ConfigUI = (function () {
   "use strict";
@@ -29,13 +29,25 @@ window.ConfigUI = (function () {
     });
     return el("label", { class: "cfg-field" }, [el("span", { text: label }), inp]);
   }
-
   function num(label, value, onCh) { return field(label, value, onCh, "number"); }
 
-  // -----------------------------------------------------------------------
+  // Defaults para configs viejas o incompletas
+  function normalize(c) {
+    c = c || {};
+    c.motores = c.motores || {};
+    c.motores.pins = c.motores.pins || { IN1: 5, IN2: 6, IN3: 10, IN4: 11 };
+    c.ultrasonido = c.ultrasonido || {};
+    c.ultrasonido.sensores = c.ultrasonido.sensores || [];
+    c.infrarrojo = c.infrarrojo || {};
+    c.infrarrojo.sensores = c.infrarrojo.sensores || [];
+    if (c.infrarrojo.lecturaBlanco == null) c.infrarrojo.lecturaBlanco = 100;
+    if (c.infrarrojo.lecturaNegro == null) c.infrarrojo.lecturaNegro = 900;
+    return c;
+  }
+
   api.load = function () {
     return fetch("/__sim/config").then(function (r) { return r.json(); }).then(function (c) {
-      cfg = c; return c;
+      cfg = normalize(c); return cfg;
     });
   };
   api.getConfig = function () { return cfg; };
@@ -44,59 +56,46 @@ window.ConfigUI = (function () {
     if (!cfg) { container.textContent = "Cargando config..."; return; }
     container.innerHTML = "";
 
-    // ---- Comando ----
-    var secC = section("Comando recibido");
-    secC.appendChild(field("Variable del request", cfg.comando.varName, function (v) { cfg.comando.varName = v; }));
-    secC.appendChild(hint("Es solo informativo: en tu sketch vos leés el request con tu propia variable."));
-
     // ---- Motores ----
-    var secM = section("Motores (pines L298N)");
+    var secM = section("Motores (L298N)");
     var p = cfg.motores.pins;
     secM.appendChild(grid([
       num("IN1 (izq adelante)", p.IN1, function (v) { p.IN1 = v; }),
-      num("IN2 (izq atras)", p.IN2, function (v) { p.IN2 = v; }),
+      num("IN2 (izq atrás)", p.IN2, function (v) { p.IN2 = v; }),
       num("IN3 (der adelante)", p.IN3, function (v) { p.IN3 = v; }),
-      num("IN4 (der atras)", p.IN4, function (v) { p.IN4 = v; })
+      num("IN4 (der atrás)", p.IN4, function (v) { p.IN4 = v; })
     ]));
-    secM.appendChild(grid([
-      field("Variable velocidad", cfg.motores.velocidadVar, function (v) { cfg.motores.velocidadVar = v; }),
-      num("Velocidad default", cfg.motores.velocidadDefault, function (v) { cfg.motores.velocidadDefault = v; })
-    ]));
-    secM.appendChild(hint("Los PINES tienen que coincidir con los #define de tu sketch. Los nombres son orientativos."));
+    secM.appendChild(hint("Mismos pines que tu cableado real."));
 
     // ---- Ultrasonido ----
     var secU = section("Ultrasonido");
     cfg.ultrasonido.sensores.forEach(function (s, i) {
-      secU.appendChild(sensorRowUS(s, i, secU));
+      secU.appendChild(sensorRowUS(s, i, container));
     });
-    var addU = el("button", { class: "small-btn", text: "+ sensor ultrasonico" });
+    var addU = el("button", { class: "small-btn", text: "+ sensor ultrasónico" });
     addU.addEventListener("click", function () {
-      cfg.ultrasonido.sensores.push({ rol: "frontal", varName: "sensor_x", trigPin: 0, echoPin: 0 });
+      cfg.ultrasonido.sensores.push({ rol: "frontal", trigPin: 0, echoPin: 0 });
       api.render(container);
     });
     secU.appendChild(addU);
+    secU.appendChild(hint("rol = dónde apunta (frontal / izquierdo / derecho)."));
 
     // ---- Infrarrojo ----
-    var secI = section("Infrarrojo (siguelinea)");
-    secI.appendChild(field("Variable umbral", cfg.infrarrojo.umbralVar, function (v) { cfg.infrarrojo.umbralVar = v; }));
-    secI.appendChild(num("Umbral default", cfg.infrarrojo.umbralDefault, function (v) { cfg.infrarrojo.umbralDefault = v; }));
+    var secI = section("Infrarrojo (siguelínea)");
     cfg.infrarrojo.sensores.forEach(function (s, i) {
       secI.appendChild(sensorRowIR(s, i, container));
     });
     var addI = el("button", { class: "small-btn", text: "+ sensor IR" });
     addI.addEventListener("click", function () {
-      cfg.infrarrojo.sensores.push({ rol: "x", varName: "lectura_x", pin: "A2" });
-      cfg.infrarrojo.cantidad = cfg.infrarrojo.sensores.length;
+      cfg.infrarrojo.sensores.push({ rol: "izq", pin: "A0" });
       api.render(container);
     });
     secI.appendChild(addI);
-
-    // ---- Parametros ----
-    var secP = section("Parametros");
-    secP.appendChild(grid([
-      num("velAvanzar", cfg.parametros.velAvanzar, function (v) { cfg.parametros.velAvanzar = v; }),
-      num("velGiro", cfg.parametros.velGiro, function (v) { cfg.parametros.velGiro = v; })
+    secI.appendChild(grid([
+      num("Lectura sobre BLANCO", cfg.infrarrojo.lecturaBlanco, function (v) { cfg.infrarrojo.lecturaBlanco = v; }),
+      num("Lectura sobre NEGRO", cfg.infrarrojo.lecturaNegro, function (v) { cfg.infrarrojo.lecturaNegro = v; })
     ]));
+    secI.appendChild(hint("Calibración real del sensor: qué valor da analogRead() sobre blanco y sobre negro (se mide en vida real). El umbral lo decidís en tu código."));
 
     // ---- Acciones ----
     var save = el("button", { class: "primary-btn", text: "Guardar y aplicar" });
@@ -111,33 +110,33 @@ window.ConfigUI = (function () {
       var fd = new FormData(); fd.append("file", file.files[0]);
       fetch("/__sim/config/import", { method: "POST", body: fd })
         .then(function (r) { return r.json(); })
-        .then(function (res) { cfg = res.config; apply(); api.render(container); });
+        .then(function (res) { cfg = normalize(res.config); apply(); api.render(container); });
     });
     var actions = el("div", { class: "cfg-actions" }, [save, exp, imp, file]);
 
-    [secC, secM, secU, secI, secP, actions].forEach(function (s) { container.appendChild(s); });
+    [secM, secU, secI, actions].forEach(function (s) { container.appendChild(s); });
   };
 
-  function sensorRowUS(s, i, parent) {
+  function sensorRowUS(s, i, container) {
     var row = el("div", { class: "sensor-row" });
     row.appendChild(field("rol", s.rol, function (v) { s.rol = v; }));
-    row.appendChild(field("variable", s.varName, function (v) { s.varName = v; }));
     row.appendChild(num("trig", s.trigPin, function (v) { s.trigPin = v; }));
     row.appendChild(num("echo", s.echoPin, function (v) { s.echoPin = v; }));
     var del = el("button", { class: "del-btn", text: "✕" });
-    del.addEventListener("click", function () { cfg.ultrasonido.sensores.splice(i, 1); row.remove(); });
+    del.addEventListener("click", function () {
+      cfg.ultrasonido.sensores.splice(i, 1);
+      api.render(container);
+    });
     row.appendChild(del);
     return row;
   }
   function sensorRowIR(s, i, container) {
     var row = el("div", { class: "sensor-row" });
     row.appendChild(field("rol", s.rol, function (v) { s.rol = v; }));
-    row.appendChild(field("variable", s.varName, function (v) { s.varName = v; }));
     row.appendChild(field("pin", s.pin, function (v) { s.pin = v; }));
     var del = el("button", { class: "del-btn", text: "✕" });
     del.addEventListener("click", function () {
       cfg.infrarrojo.sensores.splice(i, 1);
-      cfg.infrarrojo.cantidad = cfg.infrarrojo.sensores.length;
       api.render(container);
     });
     row.appendChild(del);
@@ -152,7 +151,6 @@ window.ConfigUI = (function () {
   function flash(btn, txt) { var o = btn.textContent; btn.textContent = txt; setTimeout(function () { btn.textContent = o; }, 1200); }
 
   function apply() {
-    cfg.infrarrojo.cantidad = cfg.infrarrojo.sensores.length;
     if (window.Sim) window.Sim.setConfig(cfg);
     if (api.onApply) api.onApply(cfg);
   }
