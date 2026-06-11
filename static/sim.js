@@ -103,17 +103,35 @@ window.Sim = (function () {
 
   function measureSensors() {
     lastSensors = { us: [], ir: [] };
-    var fx = robot.x + Math.cos(robot.angle) * (robot.h / 2);
-    var fy = robot.y + Math.sin(robot.angle) * (robot.h / 2);
+    var L = robot.h, A = robot.w;
+    var cosA = Math.cos(robot.angle), sinA = Math.sin(robot.angle);
 
-    // Ultrasonico
+    // Posicion local de cada sensor segun su rol (coincide con drawRobot)
+    function sensorWorldPos(localX, localY) {
+      return {
+        x: robot.x + cosA * localX - sinA * localY,
+        y: robot.y + sinA * localX + cosA * localY
+      };
+    }
+    function sensorLocalByRol(rol) {
+      rol = (rol || "").toLowerCase();
+      if (rol.indexOf("izq") >= 0 || rol.indexOf("left") >= 0)
+        return { x: L * 0.15, y: -A / 2 + 2 };    // lateral izq
+      if (rol.indexOf("der") >= 0 || rol.indexOf("right") >= 0)
+        return { x: L * 0.15, y: A / 2 - 2 };      // lateral der
+      return { x: L * 0.42, y: 0 };                  // frontal
+    }
+
+    // Ultrasonico: cada sensor emite desde SU posicion real
     var us = (cfg && cfg.ultrasonido && cfg.ultrasonido.sensores) || [];
     for (var i = 0; i < us.length; i++) {
       var s = us[i];
+      var local = sensorLocalByRol(s.rol);
+      var pos = sensorWorldPos(local.x, local.y);
       var ang = robot.angle + rolAngle(s.rol);
-      var dist = raycast(fx, fy, ang);
+      var dist = raycast(pos.x, pos.y, ang);
       window.Arduino.setUltrasonic(s.echoPin, dist);
-      lastSensors.us.push({ x: fx, y: fy, ang: ang, dist: dist });
+      lastSensors.us.push({ x: pos.x, y: pos.y, ang: ang, dist: dist });
     }
 
     // IR (lee pixel de la pista). Sensores repartidos al frente.
@@ -211,19 +229,19 @@ window.Sim = (function () {
       p.line(slineStart.x, slineStart.y, slineEnd.x, slineEnd.y);
     }
   }
-  // HC-SR04: placa azul con los dos "ojos" plateados (como el real)
+  // HC-SR04: placa azul con los dos "ojos" plateados (mas chico, proporcional al auto)
   function drawHC(x, y, rot) {
     p.push();
     p.translate(x, y);
     p.rotate(rot);
     p.noStroke(); p.fill(30, 58, 138);          // placa azul
-    p.rect(0, 0, 9, 24, 1);
-    p.stroke(110); p.strokeWeight(1); p.fill(205); // cilindros plateados
-    p.ellipse(0, -6.5, 9, 9);
-    p.ellipse(0, 6.5, 9, 9);
+    p.rect(0, 0, 6, 16, 1);
+    p.stroke(110); p.strokeWeight(0.8); p.fill(205); // cilindros plateados
+    p.ellipse(0, -4.5, 6, 6);
+    p.ellipse(0, 4.5, 6, 6);
     p.noStroke(); p.fill(70);                   // malla interior
-    p.ellipse(0, -6.5, 5, 5);
-    p.ellipse(0, 6.5, 5, 5);
+    p.ellipse(0, -4.5, 3.5, 3.5);
+    p.ellipse(0, 4.5, 3.5, 3.5);
     p.pop();
   }
 
@@ -238,56 +256,81 @@ window.Sim = (function () {
     p.rotate(robot.angle);
     p.rectMode(p.CENTER);
 
-    // Ruedas: cubierta negra + llanta amarilla (levemente atras del centro)
+    // Ruedas traseras: cubierta negra + llanta amarilla, bien atrás
     p.noStroke(); p.fill(22);
-    p.rect(-L * 0.12, -A / 2 - 5, 28, 11, 4);
-    p.rect(-L * 0.12, A / 2 + 5, 28, 11, 4);
+    p.rect(-L * 0.30, -A / 2 - 5, 24, 11, 3);   // rueda izq
+    p.rect(-L * 0.30, A / 2 + 5, 24, 11, 3);    // rueda der
     p.fill("#f1c40f");
-    p.rect(-L * 0.12, -A / 2 - 5, 14, 6, 2);
-    p.rect(-L * 0.12, A / 2 + 5, 14, 6, 2);
-    // Rueda loca delantera
-    p.fill(60); p.ellipse(L * 0.36, 0, 8, 8);
+    p.rect(-L * 0.30, -A / 2 - 5, 12, 6, 2);    // llanta izq
+    p.rect(-L * 0.30, A / 2 + 5, 12, 6, 2);     // llanta der
+    // Rueda loca delantera (chiquita, debajo del chasis)
+    p.fill(60); p.ellipse(L * 0.38, 0, 6, 6);
 
-    // Chasis negro octogonal (chaflanes al frente, como el impreso 3D)
+    // Chasis negro rectangular con chaflanes al frente
     p.stroke(0); p.strokeWeight(1.5); p.fill(30, 32, 36);
     p.beginShape();
-    p.vertex(L / 2, -A * 0.28);
-    p.vertex(L / 2, A * 0.28);
-    p.vertex(L * 0.30, A / 2);
-    p.vertex(-L * 0.40, A / 2);
-    p.vertex(-L / 2, A * 0.34);
-    p.vertex(-L / 2, -A * 0.34);
-    p.vertex(-L * 0.40, -A / 2);
-    p.vertex(L * 0.30, -A / 2);
+    p.vertex(L * 0.46, -A * 0.28);
+    p.vertex(L * 0.46, A * 0.28);
+    p.vertex(L * 0.34, A / 2);
+    p.vertex(-L * 0.42, A / 2);
+    p.vertex(-L / 2, A * 0.36);
+    p.vertex(-L / 2, -A * 0.36);
+    p.vertex(-L * 0.42, -A / 2);
+    p.vertex(L * 0.34, -A / 2);
     p.endShape(p.CLOSE);
 
-    // Arduino UNO R4 (celeste) centro-izquierda + USB plateado
-    p.noStroke(); p.fill(13, 110, 140);
-    p.rect(-L * 0.14, -A * 0.05, L * 0.28, A * 0.32, 2);
-    p.fill(190); p.rect(-L * 0.29, -A * 0.05, 6, 8, 1);
+    // === COMPONENTES (de atras hacia adelante, como el auto real) ===
 
-    // Mini protoboard amarilla
-    p.fill(222, 178, 58);
-    p.rect(L * 0.04, A * 0.18, L * 0.16, A * 0.20, 2);
+    // Arduino UNO R4 (celeste) — atras, ocupa buena parte
+    p.noStroke(); p.fill(0, 130, 150);
+    p.rect(-L * 0.20, 0, L * 0.34, A * 0.50, 2);
+    // Puerto USB plateado
+    p.fill(185); p.rect(-L * 0.37, 0, 5, 7, 1);
+    // Chip negro del micro
+    p.fill(20); p.rect(-L * 0.14, 0, L * 0.07, A * 0.12, 1);
+    // Pines dorados
+    p.fill(180, 160, 50);
+    p.rect(-L * 0.20, -A * 0.22, L * 0.28, 2, 0);
+    p.rect(-L * 0.20, A * 0.22, L * 0.28, 2, 0);
 
-    // L298N rojo con disipador negro (atras)
-    p.fill(170, 45, 45);
-    p.rect(-L * 0.33, A * 0.08, L * 0.20, A * 0.30, 2);
-    p.fill(12); p.rect(-L * 0.33, A * 0.08, L * 0.07, A * 0.20, 1);
+    // Protoboard amarilla — mas chica que el L298N, centrada
+    p.fill(240, 210, 80);
+    p.rect(L * 0.10, 0, L * 0.14, A * 0.34, 2);
+    // Canal central
+    p.fill(200, 180, 60); p.rect(L * 0.10, 0, L * 0.14, 1.5);
+    // Agujeros de la proto
+    p.fill(170, 150, 40);
+    for (var row = -2; row <= 2; row++) {
+      for (var col = -1; col <= 1; col++) {
+        p.ellipse(L * 0.10 + col * 3.5, row * 3, 1.2, 1.2);
+      }
+    }
 
-    // Modulos IR azules al frente
-    p.fill(37, 99, 235);
-    p.rect(L * 0.36, -A * 0.15, 7, 7, 1);
-    p.rect(L * 0.36, A * 0.15, 7, 7, 1);
+    // L298N rojo con disipador — adelante de la proto, mas grande que la proto
+    p.fill(192, 57, 43);
+    p.rect(L * 0.28, 0, L * 0.18, A * 0.40, 2);
+    // Disipador negro
+    p.fill(25); p.rect(L * 0.28, 0, L * 0.05, A * 0.28, 1);
+    // Borneras azules
+    p.fill(40, 80, 200);
+    p.rect(L * 0.35, -A * 0.12, 3, 5, 1);
+    p.rect(L * 0.35, A * 0.12, 3, 5, 1);
 
-    // LED amarillo (esquina frontal) — verde cuando el sketch corre
-    p.fill(running ? "#3fb950" : "#ffd43b");
-    p.ellipse(L * 0.44, -A * 0.30, 5, 5);
+    // 3 Sensores Infrarrojos dentro del chasis (naranja)
+    p.fill(230, 126, 34);
+    p.rect(L * 0.40, -A * 0.20, 5, 5, 1);
+    p.rect(L * 0.40, 0, 5, 5, 1);
+    p.rect(L * 0.40, A * 0.20, 5, 5, 1);
+    // Lentes IR (punto negro)
+    p.fill(0);
+    p.ellipse(L * 0.40, -A * 0.20, 2.5, 2.5);
+    p.ellipse(L * 0.40, 0, 2.5, 2.5);
+    p.ellipse(L * 0.40, A * 0.20, 2.5, 2.5);
 
-    // 3 sensores HC-SR04: frontal + laterales (como el real)
-    drawHC(L / 2 - 3, 0, 0);
-    drawHC(L * 0.10, -A / 2 + 4, -Math.PI / 2);
-    drawHC(L * 0.10, A / 2 - 4, Math.PI / 2);
+    // 3 sensores HC-SR04: frontal al borde, laterales adelante de la rueda (como el real)
+    drawHC(L * 0.42, 0, 0);                           // frontal
+    drawHC(L * 0.15, -A / 2 + 2, -Math.PI / 2);       // lateral izq
+    drawHC(L * 0.15, A / 2 - 2, Math.PI / 2);          // lateral der
 
     p.rectMode(p.CORNER);
     p.pop();
@@ -342,10 +385,10 @@ window.Sim = (function () {
       drawObstacles();
       if (running && window.Arduino && window.Arduino.isReady()) {
         pollIfDue(pp.deltaTime || 16);
+        applyKinematics();
         measureSensors();
         var r = window.Arduino.runLoop();
         if (!r.ok) { running = false; if (api.onError) api.onError(r.error); }
-        applyKinematics();
         if (api.onConsole) api.onConsole(window.Arduino.getConsole());
       }
       drawRobot();
