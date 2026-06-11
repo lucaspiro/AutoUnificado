@@ -2,6 +2,18 @@
 build/
 bin/
 layout.ui.cfg
+
 # Archivos de configuración de sistemas operativos
 .DS_Store
 Thumbs.db
+
+# Ejemplos
+static/ejemplos/
+
+# Carpeta profe
+profe/
+
+# Logs del servidor
+server.log
+server80.log
+*.log
