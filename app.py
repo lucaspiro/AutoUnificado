@@ -273,4 +273,6 @@ if __name__ == "__main__":
         print("  (la IP que va en la aplicacion del celular)")
         print("=" * 52, flush=True)
 
-    app.run(host="0.0.0.0", port=PORT, debug=True)
+    # Desactivamos el reloader de Flask para que no queden procesos zombis en Windows
+    # al cerrar la terminal con la X.
+    app.run(host="0.0.0.0", port=PORT, debug=True, use_reloader=False)

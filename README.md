@@ -4,14 +4,31 @@ Herramienta web para programar un auto robot **igual que en el Arduino IDE** y p
 simulador, controlándolo por HTTP. El mismo sketch que escribís acá se pega en el IDE y anda en
 el **Arduino UNO R4 WiFi** (librería `WiFiS3.h`).
 
-## Cómo correr
+## Cómo correr en tu computadora (Local)
 
+Tenés dos opciones para levantarlo de forma local según lo que prefieras:
+
+### Opción A: Inicio rápido (Recomendado)
+1. **Windows:** Hacé doble clic en el archivo [iniciar.bat](file:///d:/Piromaniac04/Descargas/Union_U_S_M/AutoUnificado/iniciar.bat).
+2. **Mac / Linux:** Abrí una terminal y ejecutá `./iniciar.sh`.
+*(El script se encarga de validar que tengas Python, instalar las librerías necesarias y levantar el servidor solo).*
+
+### Opción B: Manual por Consola
+Si preferís hacerlo a mano en la terminal:
 ```bash
-pip install flask
+# 1. Instalar dependencias
+pip install -r requirements.txt
+
+# 2. Levantar el servidor Flask
 python app.py
 ```
 
-Abrí <http://localhost>.
+---
+
+### ¿Cómo acceder?
+Una vez que el servidor esté corriendo (por cualquiera de los dos métodos), abrí en tu navegador:
+* **En tu PC:** [http://localhost](http://localhost) (o [http://localhost:5000](http://localhost:5000) si el puerto 80 estaba ocupado).
+* **Desde el celular:** Usá la dirección IP que te imprime la consola al arrancar (ej. `http://192.168.1.15`).
 
 ## Qué hace
 
