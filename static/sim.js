@@ -385,6 +385,8 @@ window.Sim = (function () {
       drawObstacles();
       if (running && window.Arduino && window.Arduino.isReady()) {
         pollIfDue(pp.deltaTime || 16);
+        // Always apply kinematics: the car keeps moving with whatever
+        // pin state was set before a delay() paused execution.
         applyKinematics();
         measureSensors();
         var r = window.Arduino.runLoop();

@@ -19,6 +19,18 @@
   var program = null;    // { setup, loop } compilado
   var t0 = 0;            // origen de millis()
 
+  // ---- Delay simulation (replay-based coroutine) --------------------------
+  // Each loop() call replays from the start. Delays already completed are
+  // skipped (delayCounter < delayStep). When the counter reaches delayStep,
+  // a DelaySignal exception pauses execution. The sim waits until
+  // Date.now() >= delayUntil, then increments delayStep and re-runs loop().
+  var delayStep = 0;       // which delay are we currently waiting for?
+  var delayCounter = 0;    // incremented inside each loop() replay
+  var delayUntil = 0;      // timestamp when current delay expires
+  var delayActive = false; // true while waiting for a delay to expire
+  var replaying = false;   // true while replaying loop() past completed delays
+  function DelaySignal() {}  // sentinel exception (not a real error)
+
   // ---- Estado del hardware simulado --------------------------------------
   var pinState = {};      // pin -> valor PWM (0..255). digital HIGH=255 LOW=0
   var ultrasonic = {};    // echoPin -> distancia cm (o grande si libre)
@@ -130,6 +142,7 @@
     return String(x);
   }
   function serialWrite(s) {
+    if (replaying) return; // suppress duplicate output during delay replay
     s = String(s);
     var parts = s.split("\n");
     consoleCur += parts[0];
@@ -188,8 +201,26 @@
       // Tiempo
       millis: function () { return Date.now() - t0; },
       micros: function () { return (Date.now() - t0) * 1000; },
-      delay: function () {},            // no bloquea el sim
-      delayMicroseconds: function () {},
+      delay: function (ms) {
+        // Replay-based delay: skip delays already completed (counter < step),
+        // pause on the current one (counter == step).
+        delayCounter++;
+        if (delayCounter <= delayStep) { replaying = false; return; } // already past this delay; stop suppressing side-effects
+        // This is the delay we need to wait for
+        ms = Math.max(0, ms | 0);
+        delayUntil = Date.now() + ms;
+        delayActive = true;
+        throw new DelaySignal();
+      },
+      delayMicroseconds: function (us) {
+        // Treat like delay but in microseconds (min 1ms granularity)
+        var ms = Math.max(1, Math.round((us || 0) / 1000));
+        delayCounter++;
+        if (delayCounter <= delayStep) { replaying = false; return; }
+        delayUntil = Date.now() + ms;
+        delayActive = true;
+        throw new DelaySignal();
+      },
       yield: function () {},
       // Math
       map: aMap, constrain: aConstrain,
@@ -334,6 +365,7 @@
     pinState = {}; ultrasonic = {}; irValues = {};
     pendingRequest = null; consoleLines = []; consoleCur = "";
     t0 = Date.now();
+    delayStep = 0; delayCounter = 0; delayUntil = 0; delayActive = false;
   }
 
   A.runSetup = function () {
@@ -344,8 +376,30 @@
 
   A.runLoop = function () {
     if (!program) return { ok: false };
-    try { program.loop(); return { ok: true }; }
-    catch (e) { return { ok: false, error: { line: parseErrLine(e, PREAMBLE_LINES) || 0, message: e.message, hint: "Error de ejecucion en loop()." } }; }
+    // If a delay is active, check if time has elapsed
+    if (delayActive) {
+      if (Date.now() < delayUntil) return { ok: true, delaying: true };
+      // Delay finished: advance step and re-run loop from the beginning
+      delayActive = false;
+      delayStep++;
+    }
+    // Replay loop(): fast-forward past completed delays, pause at current
+    delayCounter = 0;
+    replaying = (delayStep > 0);  // suppress side-effects while replaying
+    try {
+      program.loop();
+      // loop() completed without hitting any (new) delay: reset for next full run
+      delayStep = 0;
+      replaying = false;
+      return { ok: true };
+    } catch (e) {
+      replaying = false;
+      if (e instanceof DelaySignal) {
+        // Paused at a delay — sim will keep calling runLoop each frame
+        return { ok: true, delaying: true };
+      }
+      return { ok: false, error: { line: parseErrLine(e, PREAMBLE_LINES) || 0, message: e.message, hint: "Error de ejecucion en loop()." } };
+    }
   };
 
   // -----------------------------------------------------------------------
