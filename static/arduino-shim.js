@@ -370,8 +370,26 @@
 
   A.runSetup = function () {
     if (!program) return { ok: false };
-    try { program.setup(); return { ok: true }; }
-    catch (e) { return { ok: false, error: { line: parseErrLine(e, PREAMBLE_LINES) || 0, message: e.message, hint: "Error de ejecucion en setup()." } }; }
+    // Replay setup() past any delay() calls (delays are skipped instantly in setup).
+    delayStep = 0;
+    for (var attempt = 0; attempt < 500; attempt++) {
+      delayCounter = 0;
+      replaying = (delayStep > 0);
+      try {
+        program.setup();
+        replaying = false;
+        // Reset delay state so loop() starts fresh.
+        delayStep = 0; delayCounter = 0; delayUntil = 0; delayActive = false;
+        return { ok: true };
+      } catch (e) {
+        replaying = false;
+        if (e instanceof DelaySignal) { delayStep++; continue; }
+        return { ok: false, error: { line: parseErrLine(e, PREAMBLE_LINES) || 0, message: e.message, hint: "Error de ejecucion en setup()." } };
+      }
+    }
+    // Too many delays in setup — reset and continue anyway.
+    delayStep = 0; delayCounter = 0; delayUntil = 0; delayActive = false;
+    return { ok: true };
   };
 
   A.runLoop = function () {
