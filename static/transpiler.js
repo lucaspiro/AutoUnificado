@@ -101,10 +101,6 @@
     var defines = {};
     var stack = [];
     function active() { return stack.length ? stack[stack.length - 1].active : true; }
-    function parentActive() {
-      if (stack.length < 2) return true;
-      return stack[stack.length - 2].active;
-    }
     var lines = text.split("\n");
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i];
