@@ -33,6 +33,18 @@
   function countNL(s) { var m = s.match(/\n/g); return m ? m.length : 0; }
   function padNL(s) { return new Array(countNL(s) + 1).join("\n"); }
 
+  function braceDelta(s) {
+    var d = 0, q = null;
+    for (var i = 0; i < s.length; i++) {
+      var c = s[i];
+      if (q) { if (c === "\\") i++; else if (c === q) q = null; continue; }
+      if (c === '"' || c === "'" || c === "`") { q = c; continue; }
+      if (c === "{") d++;
+      else if (c === "}") d--;
+    }
+    return d;
+  }
+
   // -----------------------------------------------------------------------
   // 1. Stripper de comentarios consciente de strings (preserva newlines).
   // -----------------------------------------------------------------------
@@ -64,6 +76,96 @@
       out += c; i++;
     }
     return out;
+  }
+
+  function evalPreprocessorExpr(expr, defines) {
+    expr = String(expr || "0");
+    expr = expr.replace(/\bdefined\s*\(\s*(\w+)\s*\)/g, function (m, nm) {
+      return Object.prototype.hasOwnProperty.call(defines, nm) ? "1" : "0";
+    });
+    expr = expr.replace(/\bdefined\s+(\w+)/g, function (m, nm) {
+      return Object.prototype.hasOwnProperty.call(defines, nm) ? "1" : "0";
+    });
+    expr = expr.replace(/\b[A-Za-z_]\w*\b/g, function (nm) {
+      if (!Object.prototype.hasOwnProperty.call(defines, nm)) return "0";
+      var v = String(defines[nm] || "1").trim();
+      return /^[0-9+\-*/%()!<>=&|.\s]+$/.test(v) ? v : "1";
+    });
+    if (!/^[0-9+\-*/%()!<>=&|.\s]+$/.test(expr)) return false;
+    try { return !!Function("return (" + expr + ");")(); }
+    catch (e) { return false; }
+  }
+
+  function preprocess(text) {
+    var defines = {};
+    var stack = [];
+    function active() { return stack.length ? stack[stack.length - 1].active : true; }
+    function parentActive() {
+      if (stack.length < 2) return true;
+      return stack[stack.length - 2].active;
+    }
+    var lines = text.split("\n");
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      var m;
+      if ((m = line.match(/^[ \t]*#\s*define\s+(\w+)(?:\(([^)]*)\))?(?:[ \t]+(.*))?$/))) {
+        if (active()) defines[m[1]] = (m[3] || "1").trim() || "1";
+        else lines[i] = "";
+        continue;
+      }
+      if ((m = line.match(/^[ \t]*#\s*undef\s+(\w+)/))) {
+        if (active()) delete defines[m[1]];
+        lines[i] = "";
+        continue;
+      }
+      if ((m = line.match(/^[ \t]*#\s*ifdef\s+(\w+)/))) {
+        var pa = active();
+        var cond = Object.prototype.hasOwnProperty.call(defines, m[1]);
+        stack.push({ parent: pa, active: pa && cond, anyTrue: pa && cond });
+        lines[i] = "";
+        continue;
+      }
+      if ((m = line.match(/^[ \t]*#\s*ifndef\s+(\w+)/))) {
+        var pa2 = active();
+        var cond2 = !Object.prototype.hasOwnProperty.call(defines, m[1]);
+        stack.push({ parent: pa2, active: pa2 && cond2, anyTrue: pa2 && cond2 });
+        lines[i] = "";
+        continue;
+      }
+      if ((m = line.match(/^[ \t]*#\s*if\s+(.+)$/))) {
+        var pa3 = active();
+        var cond3 = evalPreprocessorExpr(m[1], defines);
+        stack.push({ parent: pa3, active: pa3 && cond3, anyTrue: pa3 && cond3 });
+        lines[i] = "";
+        continue;
+      }
+      if ((m = line.match(/^[ \t]*#\s*elif\s+(.+)$/))) {
+        if (stack.length) {
+          var top = stack[stack.length - 1];
+          var c = !top.anyTrue && evalPreprocessorExpr(m[1], defines);
+          top.active = top.parent && c;
+          top.anyTrue = top.anyTrue || top.active;
+        }
+        lines[i] = "";
+        continue;
+      }
+      if (/^[ \t]*#\s*else\b/.test(line)) {
+        if (stack.length) {
+          var top2 = stack[stack.length - 1];
+          top2.active = top2.parent && !top2.anyTrue;
+          top2.anyTrue = true;
+        }
+        lines[i] = "";
+        continue;
+      }
+      if (/^[ \t]*#\s*endif\b/.test(line)) {
+        if (stack.length) stack.pop();
+        lines[i] = "";
+        continue;
+      }
+      if (!active()) lines[i] = "";
+    }
+    return lines.join("\n");
   }
 
   // Split por separador respetando () [] {} y strings.
@@ -136,9 +238,11 @@
   function transpile(src) {
     var knownTypes = {};   // enum/struct/class/typedef names -> "let" o "make"
     var structNames = {};  // name -> true
+    var userFuncs = { delay: 1, delayMicroseconds: 1, yield: 1 };
 
     var text = String(src).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
     text = stripComments(text);
+    text = preprocess(text);
 
     // F("...") -> "..."  ;  PROGMEM / PSTR fuera
     text = text.replace(/\bF\s*\(\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')\s*\)/g, "$1");
@@ -147,6 +251,7 @@
 
     // Sufijos numericos enteros/float: 8000UL -> 8000, 2.5f -> 2.5
     text = text.replace(/\b(0[xX][0-9a-fA-F]+)\b/g, "$1") // hex intacto
+               .replace(/\bB([01]+)\b/g, function (m, bits) { return "0b" + bits; })
                .replace(/\b(\d+\.\d+)[fFlL]\b/g, "$1")
                .replace(/\b(\d+)[uUlL]+\b/g, "$1");
 
@@ -212,16 +317,26 @@
 
     // Declaraciones inline tras '{' o ';' (cuerpos de funcion en una sola linea)
     var inlineRe = new RegExp(
-      "([{;]\\s*)(?:(" + MOD + ")\\s+)*(?:" + baseList + ")\\b(?:\\s+(?:unsigned|signed|long|short|int|double))*\\s*[*&]*\\s*([A-Za-z_]\\w*)(\\s*[=;,])", "g");
+      "([{;][ \\t]*)(?:(" + MOD + ")[ \\t]+)*(?:" + baseList + ")\\b(?:[ \\t]+(?:unsigned|signed|long|short|int|double))*[ \\t]*[*&]*[ \\t]*([A-Za-z_]\\w*)([ \\t]*[=;,])", "g");
     text = text.replace(inlineRe, function (m, b, mod, name, after) {
       var kw = (mod && /const/.test(mod)) ? "const" : "let";
       return b + kw + " " + name + after;
     });
 
+    var tmpLines = text.split("\n");
+    for (var k = 0; k < tmpLines.length; k++) {
+      var fm = tmpLines[k].match(funcRe);
+      if (fm && !CONTROL[fm[3]]) {
+        userFuncs[fm[3]] = 1;
+      }
+    }
+
     // Procesar linea por linea (preservando cantidad de lineas)
     var lines = text.split("\n");
     var out = new Array(lines.length);
+    var staticHoists = [];
     var i = 0;
+    var currentFunc = null, funcDepth = 0;
     while (i < lines.length) {
       var line = lines[i];
       // ---- Definicion de funcion (posible firma multilinea) ----
@@ -233,6 +348,8 @@
         if (res) {
           out[i] = res.first;
           for (var k = i + 1; k <= j; k++) out[k] = "";
+          var d = braceDelta(res.first);
+          if (res.name && d > 0) { currentFunc = res.name; funcDepth = d; }
           // si el cuerpo seguia en la misma ultima linea, va incluido en res.first
           i = j + 1;
           continue;
@@ -241,16 +358,38 @@
       // ---- Declaracion de variable ----
       var dm = line.match(typeRe);
       if (dm && !CONTROL[(line.trim().split(/\s+/)[0])]) {
-        var conv = transformDecl(dm, structNames);
+        var conv = transformDecl(dm, structNames, currentFunc, staticHoists);
         if (conv !== null) { out[i] = conv; i++; continue; }
       }
       out[i] = line;
+      if (currentFunc) {
+        funcDepth += braceDelta(line);
+        if (funcDepth <= 0) { currentFunc = null; funcDepth = 0; }
+      }
       i++;
     }
 
-    var code = out.join("\n");
+    var code = (staticHoists.length ? staticHoists.join(" ") + " " : "") + out.join("\n");
     // String.length()  ->  .length
     code = code.replace(/\.length\s*\(\s*\)/g, ".length");
+    code = code.replace(/\b([A-Za-z_]\w*)\.toLowerCase\s*\(\s*\)\s*;/g, "$1 = String($1).toLowerCase();");
+    code = code.replace(/\b([A-Za-z_]\w*)\.toUpperCase\s*\(\s*\)\s*;/g, "$1 = String($1).toUpperCase();");
+    code = code.replace(/\b([A-Za-z_]\w*)\.trim\s*\(\s*\)\s*;/g, "$1 = String($1).trim();");
+
+    var awaitNames = Object.keys(userFuncs);
+    if (awaitNames.length > 0) {
+      // Avoid matching method calls like obj.delay() by requiring ^ or non-dot/non-word before
+      var awaitRegexStr = "(^|[^a-zA-Z0-9_$.])\\b(" + awaitNames.join("|") + ")\\s*\\(";
+      var awaitRe = new RegExp(awaitRegexStr, "g");
+      code = code.replace(awaitRe, function (m, pre, name, offset, full) {
+        var nameStart = offset + pre.length;
+        var before = full.slice(0, nameStart);
+        if (/\bfunction\s*$/.test(before)) return m;
+        if (/\bnew\s*$/.test(before)) return m;
+        if (/\bawait\s*$/.test(before)) return m;
+        return pre + "await " + name + "(";
+      });
+    }
 
     return { code: code, knownTypes: knownTypes };
   }
@@ -380,14 +519,14 @@
         if (LIB_TYPES.indexOf(baseType) >= 0) rhs = "new " + baseType + "(" + params + ")";
         else if (ctx.structNames[baseType]) rhs = "__make_" + baseType + "()";
         else rhs = "new " + baseType + "(" + params + ")";
-        return { first: indent + "let " + name + " = " + rhs + ";" };
+        return { first: indent + "let " + name + " = " + rhs + ";", name: null };
       }
-      return { first: indent }; // prototipo -> se elimina
+      return { first: indent, name: null }; // prototipo -> se elimina
     }
     var jsParams = convParams(params);
     // suffix puede ser multilinea: colapsamos a una sola linea (se preservan \n via blanks).
     var suffixOneLine = suffix.replace(/\n/g, " ");
-    return { first: indent + "function " + name + "(" + jsParams + ")" + suffixOneLine };
+    return { first: indent + "async function " + name + "(" + jsParams + ")" + suffixOneLine, name: name };
   }
 
   function convParams(p) {
@@ -405,7 +544,14 @@
   }
 
   // Convierte una linea de declaracion. dm = match de typeRe.
-  function transformDecl(dm, structNames) {
+  function defaultValueFor(base, isStruct) {
+    if (isStruct) return "__make_" + base + "()";
+    if (base === "String" || base === "char") return '""';
+    if (base === "bool" || base === "boolean") return "false";
+    return "0";
+  }
+
+  function transformDecl(dm, structNames, currentFunc, staticHoists) {
     var indent = dm[1];
     var mods = dm[2] || "";
     var base = dm[3];
@@ -418,7 +564,9 @@
     var tail = decls.slice(semi + 1); // normalmente ""
 
     var isConst = /\bconst\b/.test(mods);
+    var isStatic = /\bstatic\b/.test(mods);
     var kw = isConst ? "const" : "let";
+    var staticNames = [];
 
     var parts = splitTop(declPart, ",").map(function (d) {
       d = d.trim();
@@ -448,8 +596,26 @@
       if (structNames[base] && /^[A-Za-z_]\w*$/.test(d)) {
         return d + " = __make_" + base + "()";
       }
-      return d; // "name", "name = expr"
+      // clase/lib sin constructor explicito: Servo s; / Foo f;
+      if (LIB_TYPES.indexOf(base) >= 0 && /^[A-Za-z_]\w*$/.test(d)) {
+        return d + " = new " + base + "()";
+      }
+      if (isStatic) {
+        var sm = d.match(/^([A-Za-z_]\w*)\s*(?:=\s*([\s\S]+))?$/);
+        if (sm) staticNames.push({ name: sm[1], init: sm[2] || defaultValueFor(base, structNames[base]) });
+      }
+      if (/^[A-Za-z_]\w*$/.test(d) && base !== "void") {
+        return d + " = " + defaultValueFor(base, false);
+      }
+      return d; // "name = expr"
     }).filter(function (x) { return x !== ""; });
+
+    if (isStatic && currentFunc && staticNames.length) {
+      staticNames.forEach(function (s) {
+        staticHoists.push(kw + " " + s.name + " = " + s.init + ";");
+      });
+      return indent + "";
+    }
 
     return indent + kw + " " + parts.join(", ") + ";" + tail;
   }
@@ -458,7 +624,8 @@
     if (idx >= sizes.length) return isStruct ? "{}" : "0";
     var n = sizes[idx];
     if (!n) return "[]";
-    return "new Array(" + n + ").fill(0)";
+    var inner = buildArray(sizes, idx + 1, isStruct);
+    return "Array.from({ length: " + n + " }, function(){ return " + inner + "; })";
   }
 
   function indexOfTop(str, ch) {
