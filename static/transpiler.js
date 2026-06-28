@@ -79,6 +79,7 @@
   }
 
   function evalPreprocessorExpr(expr, defines) {
+    var safeExprRe = /^[0-9a-fA-FxXbB+\-*/%()!<>=&|.^~\s]+$/;
     expr = String(expr || "0");
     expr = expr.replace(/\bdefined\s*\(\s*(\w+)\s*\)/g, function (m, nm) {
       return Object.prototype.hasOwnProperty.call(defines, nm) ? "1" : "0";
@@ -89,9 +90,9 @@
     expr = expr.replace(/\b[A-Za-z_]\w*\b/g, function (nm) {
       if (!Object.prototype.hasOwnProperty.call(defines, nm)) return "0";
       var v = String(defines[nm] || "1").trim();
-      return /^[0-9+\-*/%()!<>=&|.\s]+$/.test(v) ? v : "1";
+      return safeExprRe.test(v) ? v : "1";
     });
-    if (!/^[0-9+\-*/%()!<>=&|.\s]+$/.test(expr)) return false;
+    if (!safeExprRe.test(expr)) return false;
     try { return !!Function("return (" + expr + ");")(); }
     catch (e) { return false; }
   }
@@ -335,6 +336,7 @@
     var lines = text.split("\n");
     var out = new Array(lines.length);
     var staticHoists = [];
+    var staticMaps = {};
     var i = 0;
     var currentFunc = null, funcDepth = 0;
     while (i < lines.length) {
@@ -358,10 +360,17 @@
       // ---- Declaracion de variable ----
       var dm = line.match(typeRe);
       if (dm && !CONTROL[(line.trim().split(/\s+/)[0])]) {
-        var conv = transformDecl(dm, structNames, currentFunc, staticHoists);
-        if (conv !== null) { out[i] = conv; i++; continue; }
+        var conv = transformDecl(dm, structNames, currentFunc, staticHoists, staticMaps);
+        if (conv !== null) {
+          out[i] = currentFunc && staticMaps[currentFunc] ? replaceIdentifiers(conv, staticMaps[currentFunc]) : conv;
+          i++;
+          continue;
+        }
       }
       out[i] = line;
+      if (currentFunc && staticMaps[currentFunc]) {
+        out[i] = replaceIdentifiers(out[i], staticMaps[currentFunc]);
+      }
       if (currentFunc) {
         funcDepth += braceDelta(line);
         if (funcDepth <= 0) { currentFunc = null; funcDepth = 0; }
@@ -376,22 +385,70 @@
     code = code.replace(/\b([A-Za-z_]\w*)\.toUpperCase\s*\(\s*\)\s*;/g, "$1 = String($1).toUpperCase();");
     code = code.replace(/\b([A-Za-z_]\w*)\.trim\s*\(\s*\)\s*;/g, "$1 = String($1).trim();");
 
-    var awaitNames = Object.keys(userFuncs);
-    if (awaitNames.length > 0) {
-      // Avoid matching method calls like obj.delay() by requiring ^ or non-dot/non-word before
-      var awaitRegexStr = "(^|[^a-zA-Z0-9_$.])\\b(" + awaitNames.join("|") + ")\\s*\\(";
-      var awaitRe = new RegExp(awaitRegexStr, "g");
-      code = code.replace(awaitRe, function (m, pre, name, offset, full) {
-        var nameStart = offset + pre.length;
-        var before = full.slice(0, nameStart);
-        if (/\bfunction\s*$/.test(before)) return m;
-        if (/\bnew\s*$/.test(before)) return m;
-        if (/\bawait\s*$/.test(before)) return m;
-        return pre + "await " + name + "(";
-      });
-    }
+    code = insertAwaitsInFunctions(code, Object.keys(userFuncs));
 
     return { code: code, knownTypes: knownTypes };
+  }
+
+  function replaceIdentifiers(line, map) {
+    var names = Object.keys(map || {});
+    if (!names.length) return line;
+    var re = new RegExp("\\b(" + names.join("|") + ")\\b", "g");
+    return replaceOutsideStrings(line, re, function (m, name) { return map[name] || m; });
+  }
+
+  function replaceOutsideStrings(text, re, replacer) {
+    var out = "", chunk = "", q = null;
+    function flush() {
+      if (chunk) {
+        out += chunk.replace(re, replacer);
+        chunk = "";
+      }
+    }
+    for (var i = 0; i < text.length; i++) {
+      var c = text[i];
+      if (q) {
+        out += c;
+        if (c === "\\") {
+          if (i + 1 < text.length) out += text[++i];
+        } else if (c === q) {
+          q = null;
+        }
+        continue;
+      }
+      if (c === '"' || c === "'" || c === "`") {
+        flush();
+        q = c;
+        out += c;
+        continue;
+      }
+      chunk += c;
+    }
+    flush();
+    return out;
+  }
+
+  function insertAwaitsInFunctions(code, names) {
+    if (!names.length) return code;
+    var callRe = new RegExp("(^|[^a-zA-Z0-9_$.])\\b(" + names.join("|") + ")\\s*\\(", "g");
+    var lines = code.split("\n");
+    var depth = 0;
+    for (var i = 0; i < lines.length; i++) {
+      var startsFunc = /\basync\s+function\b/.test(lines[i]);
+      if (depth > 0 || startsFunc) {
+        lines[i] = replaceOutsideStrings(lines[i], callRe, function (m, pre, name, offset, full) {
+          var nameStart = offset + pre.length;
+          var before = full.slice(0, nameStart);
+          if (/\bfunction\s*$/.test(before)) return m;
+          if (/\bnew\s*$/.test(before)) return m;
+          if (/\bawait\s*$/.test(before)) return m;
+          return pre + "await " + name + "(";
+        });
+      }
+      if (depth > 0 || startsFunc) depth += braceDelta(lines[i]);
+      if (depth < 0) depth = 0;
+    }
+    return lines.join("\n");
   }
 
   // class Nombre [: base] { cuerpo };  -> class JS best-effort
@@ -551,7 +608,7 @@
     return "0";
   }
 
-  function transformDecl(dm, structNames, currentFunc, staticHoists) {
+  function transformDecl(dm, structNames, currentFunc, staticHoists, staticMaps) {
     var indent = dm[1];
     var mods = dm[2] || "";
     var base = dm[3];
@@ -604,7 +661,7 @@
         var sm = d.match(/^([A-Za-z_]\w*)\s*(?:=\s*([\s\S]+))?$/);
         if (sm) staticNames.push({ name: sm[1], init: sm[2] || defaultValueFor(base, structNames[base]) });
       }
-      if (/^[A-Za-z_]\w*$/.test(d) && base !== "void") {
+      if (!currentFunc && /^[A-Za-z_]\w*$/.test(d) && base !== "void") {
         return d + " = " + defaultValueFor(base, false);
       }
       return d; // "name = expr"
@@ -612,7 +669,10 @@
 
     if (isStatic && currentFunc && staticNames.length) {
       staticNames.forEach(function (s) {
-        staticHoists.push(kw + " " + s.name + " = " + s.init + ";");
+        var unique = "__static_" + currentFunc + "_" + s.name;
+        staticHoists.push(kw + " " + unique + " = " + s.init + ";");
+        staticMaps[currentFunc] = staticMaps[currentFunc] || {};
+        staticMaps[currentFunc][s.name] = unique;
       });
       return indent + "";
     }

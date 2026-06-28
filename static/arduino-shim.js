@@ -323,9 +323,11 @@
     if (/Assignment to constant variable/.test(msg)) {
       return "El codigo intenta cambiar una constante o un #define. En Arduino un #define no se puede reasignar.";
     }
-    return phase === "compile"
-      ? "Revisa que no falte un ';', un parentesis o una llave. Si la linea es C++ valido, falta soporte del transpilador para ese patron."
-      : "Error de ejecucion en " + phase + "(). Revisa la linea indicada y el estado de variables/sensores.";
+    if (phase === "compile") {
+      return "Revisa que no falte un ';', un parentesis o una llave. Si la linea es C++ valido, falta soporte del transpilador para ese patron.";
+    }
+    var where = (phase === "setup" || phase === "loop") ? (phase + "()") : phase;
+    return "Error de ejecucion en " + where + ". Revisa la linea indicada y el estado de variables/sensores.";
   }
 
   function makeRuntimeError(err, phase) {
@@ -454,7 +456,7 @@
     loopRunning = true;
     try {
       var p = program.loop();
-      if (p && p.catch) {
+      if (p && p.then) {
         p.then(function() {
           loopRunning = false;
         }, function(err) {
