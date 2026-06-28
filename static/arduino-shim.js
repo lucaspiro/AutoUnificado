@@ -415,22 +415,13 @@
     loopRunning = false; loopError = null;
   }
 
-  A.runSetup = function () {
+  A.runSetup = async function () {
     if (!program) return { ok: false };
     setupRunning = true;
     setupError = null;
     try {
-      var p = program.setup();
-      if (p && p.then) {
-        p.then(function () {
-          setupRunning = false;
-        }, function (err) {
-          setupError = makeRuntimeError(err, "setup");
-          setupRunning = false;
-        });
-      } else {
-        setupRunning = false;
-      }
+      await program.setup();
+      setupRunning = false;
       return { ok: true };
     } catch (e) {
       setupRunning = false;

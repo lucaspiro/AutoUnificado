@@ -392,8 +392,10 @@
   function replaceIdentifiers(line, map) {
     var names = Object.keys(map || {});
     if (!names.length) return line;
-    var re = new RegExp("\\b(" + names.join("|") + ")\\b", "g");
-    return replaceOutsideStrings(line, re, function (m, name) { return map[name] || m; });
+    var re = new RegExp("(^|[^A-Za-z0-9_$.])(" + names.map(esc).join("|") + ")\\b(?!\\s*:)", "g");
+    return replaceOutsideStrings(line, re, function (m, pre, name) {
+      return pre + (map[name] || name);
+    });
   }
 
   function replaceOutsideStrings(text, re, replacer) {
