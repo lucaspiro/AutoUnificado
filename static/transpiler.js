@@ -335,7 +335,6 @@
     // Procesar linea por linea (preservando cantidad de lineas)
     var lines = text.split("\n");
     var out = new Array(lines.length);
-    var staticHoists = [];
     var staticMaps = {};
     var i = 0;
     var currentFunc = null, funcDepth = 0;
@@ -360,7 +359,7 @@
       // ---- Declaracion de variable ----
       var dm = line.match(typeRe);
       if (dm && !CONTROL[(line.trim().split(/\s+/)[0])]) {
-        var conv = transformDecl(dm, structNames, currentFunc, staticHoists, staticMaps);
+        var conv = transformDecl(dm, structNames, currentFunc, staticMaps);
         if (conv !== null) {
           out[i] = currentFunc && staticMaps[currentFunc] ? replaceIdentifiers(conv, staticMaps[currentFunc]) : conv;
           i++;
@@ -378,7 +377,7 @@
       i++;
     }
 
-    var code = (staticHoists.length ? staticHoists.join(" ") + " " : "") + out.join("\n");
+    var code = out.join("\n");
     // String.length()  ->  .length
     code = code.replace(/\.length\s*\(\s*\)/g, ".length");
     code = code.replace(/\b([A-Za-z_]\w*)\.toLowerCase\s*\(\s*\)\s*;/g, "$1 = String($1).toLowerCase();");
@@ -608,7 +607,7 @@
     return "0";
   }
 
-  function transformDecl(dm, structNames, currentFunc, staticHoists, staticMaps) {
+  function transformDecl(dm, structNames, currentFunc, staticMaps) {
     var indent = dm[1];
     var mods = dm[2] || "";
     var base = dm[3];
@@ -668,13 +667,14 @@
     }).filter(function (x) { return x !== ""; });
 
     if (isStatic && currentFunc && staticNames.length) {
+      var initLines = [];
       staticNames.forEach(function (s) {
-        var unique = "__static_" + currentFunc + "_" + s.name;
-        staticHoists.push(kw + " " + unique + " = " + s.init + ";");
+        var unique = currentFunc + ".__static_" + s.name;
         staticMaps[currentFunc] = staticMaps[currentFunc] || {};
         staticMaps[currentFunc][s.name] = unique;
+        initLines.push("if (typeof " + unique + ' === "undefined") ' + unique + " = " + s.init + ";");
       });
-      return indent + "";
+      return indent + initLines.join(" ");
     }
 
     return indent + kw + " " + parts.join(", ") + ";" + tail;
