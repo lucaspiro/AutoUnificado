@@ -59,7 +59,10 @@
         <div class="editor-header">📝 mi_robot.ino <span class="editor-hint">— pegá tu sketch completo, igual que en el Arduino IDE</span></div>
         <div class="editor-body">
           <div id="gutter" class="gutter"></div>
-          <textarea id="editor" spellcheck="false"></textarea>
+          <div class="code-area">
+            <pre id="hl" aria-hidden="true"></pre>
+            <textarea id="editor" spellcheck="false" wrap="off" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
+          </div>
         </div>
       </div>
 
@@ -95,6 +98,7 @@
 
   <script src="/static/transpiler.js"></script>
   <script src="/static/linter.js"></script>
+  <script src="/static/highlight.js"></script>
   <script src="/static/arduino-shim.js"></script>
   <script src="/static/sim.js"></script>
   <script src="/static/control.js"></script>

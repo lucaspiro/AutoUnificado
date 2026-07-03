@@ -242,21 +242,52 @@ h1 {
   user-select: none;
   min-width: 34px;
 }
-#editor {
+.code-area {
+  position: relative;
   flex: 1;
-  background: transparent;
-  color: #e6edf3;
+  overflow: hidden;
+}
+/* Capa de colores (debajo) y textarea transparente (arriba): mismas
+   metricas de fuente EXACTAS para que se superpongan 1:1. */
+#hl, #editor {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  margin: 0;
   border: none;
-  resize: none;
   padding: 12px;
   font-family: 'Fira Code', 'Cascadia Code', Consolas, monospace;
   font-size: 12.5px;
   line-height: 1.55;
-  outline: none;
   white-space: pre;
-  overflow: auto;
+  tab-size: 2;
 }
-#editor::selection { background: rgba(88, 166, 255, 0.3); }
+#hl {
+  color: #e6edf3;
+  background: transparent;
+  overflow: hidden;
+  pointer-events: none;
+}
+#editor {
+  background: transparent;
+  color: transparent;        /* el texto lo pinta #hl */
+  caret-color: #e6edf3;
+  resize: none;
+  outline: none;
+  overflow: auto;
+  z-index: 1;
+}
+#editor::selection { background: rgba(88, 166, 255, 0.3); color: transparent; }
+
+/* Paleta Arduino IDE (ajustada a fondo oscuro) */
+.tk-com   { color: #8b949e; font-style: italic; }  /* comentarios */
+.tk-str   { color: #58c6cf; }                      /* strings y chars */
+.tk-pre   { color: #a3b93a; }                      /* #include / #define */
+.tk-ctrl  { color: #c9b94e; font-weight: 600; }    /* if / for / while */
+.tk-type  { color: #00b3ba; font-weight: 600; }    /* void / int / float */
+.tk-obj   { color: #00b3ba; }                      /* Serial / WiFi */
+.tk-const { color: #2bbfa3; }                      /* HIGH / LOW / OUTPUT */
+.tk-fn    { color: #f07830; }                      /* digitalWrite / delay */
+.tk-num   { color: #d19a66; }                      /* numeros */
 
 /* ───────────────────────── Panel de error ───────────────────────── */
 .err-panel {

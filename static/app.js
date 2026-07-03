@@ -69,7 +69,11 @@
     editor.value = window.STARTER_SKETCH || "";
     updateGutter();
     editor.addEventListener("input", updateGutter);
-    editor.addEventListener("scroll", function () { gutter.scrollTop = editor.scrollTop; });
+    editor.addEventListener("scroll", function () {
+      gutter.scrollTop = editor.scrollTop;
+      var hl = document.getElementById("hl");
+      if (hl) { hl.scrollTop = editor.scrollTop; hl.scrollLeft = editor.scrollLeft; }
+    });
     editor.addEventListener("keydown", function (e) {
       if (e.key === "Tab") {
         e.preventDefault();
@@ -91,6 +95,17 @@
         : i + "\n";
     }
     gutter.innerHTML = html;
+    renderHighlight();
+  }
+
+  // Capa de colores estilo Arduino IDE debajo del textarea transparente
+  function renderHighlight() {
+    var hl = document.getElementById("hl");
+    if (!hl || !window.Highlight) return;
+    // "\n" final extra para que el scroll del pre llegue igual que el textarea
+    hl.innerHTML = window.Highlight.render(editor.value) + "\n";
+    hl.scrollTop = editor.scrollTop;
+    hl.scrollLeft = editor.scrollLeft;
   }
   function markErrLines(lines) {
     errLines = lines || [];
