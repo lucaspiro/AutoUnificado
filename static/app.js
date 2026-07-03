@@ -27,7 +27,7 @@
       window.ConfigUI.render(document.getElementById("config-panel"));
       window.ConfigUI.onApply = function (c) { window.Sim.setConfig(c); };
       // Compilacion inicial silenciosa para que Ejecutar ande de una
-      compileAndLoad(true);
+      compileAndLoad(true, false);
     });
   });
 
@@ -88,30 +88,33 @@
   }
 
   // ---- Compilacion ----
-  function compileAndLoad(silent) {
+  async function compileAndLoad(silent, runSetup) {
+    if (runSetup == null) runSetup = true;
     clearError();
     var res = window.Arduino.compile(editor.value);
     if (!res.ok) { if (!silent) showError(res.error); return false; }
-    var su = window.Arduino.runSetup();
+    if (!runSetup) return true;
+    var su = await window.Arduino.runSetup();
     if (!su.ok) { if (!silent) showError(su.error); return false; }
     return true;
   }
 
   // ---- Controles principales (estilo originales: Ejecutar / Pausa / Restart) ----
   function setupSimControls() {
-    document.getElementById("btnPlay").addEventListener("click", function () {
+    document.getElementById("btnPlay").addEventListener("click", async function () {
       // Ejecutar = compilar el sketch actual + correr (como runCode() original)
-      if (!compileAndLoad(false)) { goTab("code"); return; }
+      var success = await compileAndLoad(false, true);
+      if (!success) { goTab("code"); return; }
       serialEl.textContent = "";
       window.Sim.start();
     });
     document.getElementById("btnPause").addEventListener("click", function () {
       window.Sim.pause();
     });
-    document.getElementById("btnReset").addEventListener("click", function () {
+    document.getElementById("btnReset").addEventListener("click", async function () {
       window.Sim.pause();
       clearError();
-      compileAndLoad(true);
+      await compileAndLoad(true, true);
       window.Sim.reset();
       serialEl.textContent = "";
       lastReqEl.textContent = "—";

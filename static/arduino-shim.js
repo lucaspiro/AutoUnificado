@@ -17,19 +17,30 @@
   var A = {};            // API publica -> global.Arduino
   var env = null;        // objeto inyectado al codigo del usuario (con `with`)
   var program = null;    // { setup, loop } compilado
+  var currentSource = "";
   var t0 = 0;            // origen de millis()
 
-  // ---- Delay simulation (replay-based coroutine) --------------------------
-  // Each loop() call replays from the start. Delays already completed are
-  // skipped (delayCounter < delayStep). When the counter reaches delayStep,
-  // a DelaySignal exception pauses execution. The sim waits until
-  // Date.now() >= delayUntil, then increments delayStep and re-runs loop().
-  var delayStep = 0;       // which delay are we currently waiting for?
-  var delayCounter = 0;    // incremented inside each loop() replay
-  var delayUntil = 0;      // timestamp when current delay expires
-  var delayActive = false; // true while waiting for a delay to expire
-  var replaying = false;   // true while replaying loop() past completed delays
-  function DelaySignal() {}  // sentinel exception (not a real error)
+  // ---- Async execution state --------------------------
+  var setupRunning = false;
+  var setupError = null;
+  var loopRunning = false;
+  var loopError = null;
+  var replaying = false; // Kept for api compat
+  // Generacion de ejecucion: reset()/compile() la incrementan. Un delay()
+  // pendiente de un sketch anterior compara su generacion al vencer y, si
+  // quedo vieja, NUNCA resuelve -> ese loop queda suspendido para siempre
+  // y no puede escribir pines/consola de la sesion nueva.
+  var runGen = 0;
+
+  function genSleep(ms) {
+    var g = runGen;
+    return new Promise(function (resolve) {
+      setTimeout(function () {
+        if (g === runGen) resolve();
+        // generacion vieja: no resolver jamas (el sketch anterior muere aca)
+      }, ms);
+    });
+  }
 
   // ---- Estado del hardware simulado --------------------------------------
   var pinState = {};      // pin -> valor PWM (0..255). digital HIGH=255 LOW=0
@@ -75,25 +86,27 @@
   // Stubs de WiFiS3
   // -----------------------------------------------------------------------
   function WiFiClient(line) {
-    this._buf = (line != null) ? (line + "\n") : "";
+    this._buf = (line != null) ? (line + "\r\n\r\n") : "";
     this._open = true;
   }
-  WiFiClient.prototype.connected = function () { return this._open; };
+  WiFiClient.prototype.connected = function () { return this._open && this._buf.length > 0; };
   WiFiClient.prototype.available = function () { return this._buf.length; };
   WiFiClient.prototype.read = function () {
-    if (!this._buf.length) return "";
+    if (!this._buf.length) { this._open = false; return ""; }
     var ch = this._buf[0];
     this._buf = this._buf.slice(1);
+    if (!this._buf.length) this._open = false;
     return ch; // 1-char string: compara bien contra '\n', '\r'
   };
   WiFiClient.prototype.readStringUntil = function (term) {
     var idx = this._buf.indexOf(term);
-    if (idx < 0) { var s = this._buf; this._buf = ""; return s; }
+    if (idx < 0) { var s = this._buf; this._buf = ""; this._open = false; return s; }
     var s2 = this._buf.slice(0, idx);
     this._buf = this._buf.slice(idx + 1);
+    if (!this._buf.length) this._open = false;
     return s2;
   };
-  WiFiClient.prototype.readString = function () { var s = this._buf; this._buf = ""; return s; };
+  WiFiClient.prototype.readString = function () { var s = this._buf; this._buf = ""; this._open = false; return s; };
   WiFiClient.prototype.peek = function () { return this._buf.length ? this._buf[0] : ""; };
   WiFiClient.prototype.print = function () {};
   WiFiClient.prototype.println = function () {};
@@ -142,7 +155,6 @@
     return String(x);
   }
   function serialWrite(s) {
-    if (replaying) return; // suppress duplicate output during delay replay
     s = String(s);
     var parts = s.split("\n");
     consoleCur += parts[0];
@@ -187,7 +199,7 @@
     var e = {
       // IO
       pinMode: function () {},
-      digitalWrite: function (pin, val) { setPin(pin, (val === CONST.HIGH || val === true || val === 1) ? 255 : 0); },
+      digitalWrite: function (pin, val) { setPin(pin, val ? 255 : 0); },
       digitalRead: function (pin) { return (pinState[pin] || 0) > 127 ? 1 : 0; },
       analogWrite: function (pin, val) { setPin(pin, Math.max(0, Math.min(255, val | 0))); },
       analogRead: function (pin) { var v = irValues[pin]; return v == null ? 0 : v | 0; },
@@ -201,27 +213,12 @@
       // Tiempo
       millis: function () { return Date.now() - t0; },
       micros: function () { return (Date.now() - t0) * 1000; },
-      delay: function (ms) {
-        // Replay-based delay: skip delays already completed (counter < step),
-        // pause on the current one (counter == step).
-        delayCounter++;
-        if (delayCounter <= delayStep) { replaying = false; return; } // already past this delay; stop suppressing side-effects
-        // This is the delay we need to wait for
-        ms = Math.max(0, ms | 0);
-        delayUntil = Date.now() + ms;
-        delayActive = true;
-        throw new DelaySignal();
-      },
+      delay: function (ms) { return genSleep(Math.max(0, ms | 0)); },
       delayMicroseconds: function (us) {
-        // Treat like delay but in microseconds (min 1ms granularity)
-        var ms = Math.max(1, Math.round((us || 0) / 1000));
-        delayCounter++;
-        if (delayCounter <= delayStep) { replaying = false; return; }
-        delayUntil = Date.now() + ms;
-        delayActive = true;
-        throw new DelaySignal();
+        return genSleep(Math.max(1, Math.round((us || 0) / 1000)));
       },
-      yield: function () {},
+      __yield: function () { return genSleep(0); },
+      yield: function () { return genSleep(0); },
       // Math
       map: aMap, constrain: aConstrain,
       min: function (a, b) { return Math.min(a, b); },
@@ -311,6 +308,61 @@
     return null;
   }
 
+  function sourceLine(src, line) {
+    if (!line || line < 1) return "";
+    return String(src || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n")[line - 1] || "";
+  }
+
+  function hintForError(err, phase, srcLine) {
+    var msg = (err && err.message) || "";
+    if (/Unexpected identifier|Unexpected token/.test(msg) && /\b(if|for|while)\s*\([^)]*\)\s*(?:int|long|float|double|bool|boolean|byte|String|char)\b/.test(srcLine || "")) {
+      return "Hay una declaracion C/C++ justo despues de un if/for/while sin llaves. En el simulador usa llaves: if (...) { int x = ...; }.";
+    }
+    if (/Unexpected identifier|Unexpected token/.test(msg)) {
+      return "El transpilador dejo sintaxis C/C++ sin convertir en esta linea. Revisa declaradores, llaves y punto y coma.";
+    }
+    if (/is not defined/.test(msg)) {
+      return "Hay un nombre que no existe en el sketch simulado. Revisa #define, pines, variables globales o una libreria no soportada.";
+    }
+    if (/Cannot read properties of undefined/.test(msg)) {
+      return "Se esta usando un objeto o variable antes de inicializarlo. Revisa declaraciones como Tipo nombre; y constructores.";
+    }
+    if (/Assignment to constant variable/.test(msg)) {
+      return "El codigo intenta cambiar una constante o un #define. En Arduino un #define no se puede reasignar.";
+    }
+    if (phase === "compile") {
+      return "Revisa que no falte un ';', un parentesis o una llave. Si la linea es C++ valido, falta soporte del transpilador para ese patron.";
+    }
+    var where = (phase === "setup" || phase === "loop") ? (phase + "()") : phase;
+    return "Error de ejecucion en " + where + ". Revisa la linea indicada y el estado de variables/sensores.";
+  }
+
+  function makeRuntimeError(err, phase) {
+    var line = parseErrLine(err, PREAMBLE_LINES) || 0;
+    var text = sourceLine(currentSource, line);
+    return {
+      line: line,
+      message: err && err.message || String(err),
+      hint: hintForError(err, phase, text),
+      text: text
+    };
+  }
+
+  function findLikelySourceLine(src) {
+    var lines = String(src || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+    for (var i = 0; i < lines.length; i++) {
+      if (/\b(if|for|while)\s*\([^)]*\)\s*(?:int|long|float|double|bool|boolean|byte|String|char)\b/.test(lines[i])) {
+        return i + 1;
+      }
+    }
+    for (var j = 0; j < lines.length; j++) {
+      if (/^\s*(?:int|long|float|double|bool|boolean|byte|String|char)\b/.test(lines[j]) && lines[j].indexOf(";") < 0 && lines[j].indexOf("{") < 0) {
+        return j + 1;
+      }
+    }
+    return 0;
+  }
+
   // -----------------------------------------------------------------------
   // Compilacion
   // -----------------------------------------------------------------------
@@ -318,6 +370,10 @@
 
   A.compile = function (userSrc) {
     program = null;
+    runGen++; // programa nuevo: los delays del anterior no deben resolver
+    setupRunning = false; setupError = null;
+    loopRunning = false; loopError = null;
+    currentSource = String(userSrc || "");
     var T = global.Transpiler;
     if (!T) return { ok: false, error: { line: 0, message: "Transpiler no cargado", hint: "" } };
 
@@ -334,14 +390,18 @@
     try {
       factory = new Function("__env", body);
     } catch (e) {
-      var line = issue ? issue.line : parseErrLine(e, PREAMBLE_LINES);
+      // SyntaxError de new Function: V8 NO pone la posicion del codigo
+      // compilado en el stack (solo el frame que llamo a new Function),
+      // asi que la heuristica sobre el fuente va primero.
+      var line = issue ? issue.line : (findLikelySourceLine(userSrc) || parseErrLine(e, PREAMBLE_LINES));
+      var errorText = issue ? issue.text : (line ? sourceLine(userSrc, line) : "");
       return {
         ok: false,
         error: {
           line: line || 0,
           message: e.message,
-          hint: issue ? issue.hint : "Revisa que no falte un ';' al final, o un parentesis/llave.",
-          text: issue ? issue.text : ""
+          hint: issue ? issue.hint : hintForError(e, "compile", errorText),
+          text: errorText
         }
       };
     }
@@ -354,70 +414,71 @@
     } catch (e2) {
       return {
         ok: false,
-        error: { line: parseErrLine(e2, PREAMBLE_LINES) || 0, message: e2.message,
-                 hint: "Error al inicializar variables globales del sketch.", text: "" }
+        error: makeRuntimeError(e2, "inicializacion")
       };
     }
     return { ok: true };
   };
 
   function resetState() {
+    runGen++; // invalida delays pendientes de la corrida anterior
     pinState = {}; ultrasonic = {}; irValues = {};
     pendingRequest = null; consoleLines = []; consoleCur = "";
     t0 = Date.now();
-    delayStep = 0; delayCounter = 0; delayUntil = 0; delayActive = false;
+    setupRunning = false; setupError = null;
+    loopRunning = false; loopError = null;
   }
 
-  A.runSetup = function () {
+  A.runSetup = async function () {
     if (!program) return { ok: false };
-    // Replay setup() past any delay() calls (delays are skipped instantly in setup).
-    delayStep = 0;
-    for (var attempt = 0; attempt < 500; attempt++) {
-      delayCounter = 0;
-      replaying = (delayStep > 0);
-      try {
-        program.setup();
-        replaying = false;
-        // Reset delay state so loop() starts fresh.
-        delayStep = 0; delayCounter = 0; delayUntil = 0; delayActive = false;
-        return { ok: true };
-      } catch (e) {
-        replaying = false;
-        if (e instanceof DelaySignal) { delayStep++; continue; }
-        return { ok: false, error: { line: parseErrLine(e, PREAMBLE_LINES) || 0, message: e.message, hint: "Error de ejecucion en setup()." } };
-      }
+    setupRunning = true;
+    setupError = null;
+    try {
+      await program.setup();
+      setupRunning = false;
+      return { ok: true };
+    } catch (e) {
+      setupRunning = false;
+      return { ok: false, error: makeRuntimeError(e, "setup") };
     }
-    // Too many delays in setup — reset and continue anyway.
-    delayStep = 0; delayCounter = 0; delayUntil = 0; delayActive = false;
-    return { ok: true };
   };
 
   A.runLoop = function () {
     if (!program) return { ok: false };
-    // If a delay is active, check if time has elapsed
-    if (delayActive) {
-      if (Date.now() < delayUntil) return { ok: true, delaying: true };
-      // Delay finished: advance step and re-run loop from the beginning
-      delayActive = false;
-      delayStep++;
+    if (setupError) {
+       var se = setupError;
+       setupError = null;
+       return { ok: false, error: se };
     }
-    // Replay loop(): fast-forward past completed delays, pause at current
-    delayCounter = 0;
-    replaying = (delayStep > 0);  // suppress side-effects while replaying
+    if (setupRunning) return { ok: true, delaying: true };
+    if (loopError) {
+       var e = loopError;
+       loopError = null;
+       return { ok: false, error: e };
+    }
+    if (loopRunning) return { ok: true, delaying: true };
+
+    loopRunning = true;
     try {
-      program.loop();
-      // loop() completed without hitting any (new) delay: reset for next full run
-      delayStep = 0;
-      replaying = false;
-      return { ok: true };
-    } catch (e) {
-      replaying = false;
-      if (e instanceof DelaySignal) {
-        // Paused at a delay — sim will keep calling runLoop each frame
-        return { ok: true, delaying: true };
+      var g = runGen;
+      var p = program.loop();
+      if (p && p.then) {
+        p.then(function() {
+          if (g === runGen) loopRunning = false;
+        }, function(err) {
+          if (g === runGen) {
+            loopError = makeRuntimeError(err, "loop");
+            loopRunning = false;
+          }
+        });
+      } else {
+        loopRunning = false;
       }
-      return { ok: false, error: { line: parseErrLine(e, PREAMBLE_LINES) || 0, message: e.message, hint: "Error de ejecucion en loop()." } };
+    } catch (err) {
+      loopRunning = false;
+      return { ok: false, error: makeRuntimeError(err, "loop") };
     }
+    return { ok: true };
   };
 
   // -----------------------------------------------------------------------
