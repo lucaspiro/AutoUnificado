@@ -26,6 +26,21 @@
   var loopRunning = false;
   var loopError = null;
   var replaying = false; // Kept for api compat
+  // Generacion de ejecucion: reset()/compile() la incrementan. Un delay()
+  // pendiente de un sketch anterior compara su generacion al vencer y, si
+  // quedo vieja, NUNCA resuelve -> ese loop queda suspendido para siempre
+  // y no puede escribir pines/consola de la sesion nueva.
+  var runGen = 0;
+
+  function genSleep(ms) {
+    var g = runGen;
+    return new Promise(function (resolve) {
+      setTimeout(function () {
+        if (g === runGen) resolve();
+        // generacion vieja: no resolver jamas (el sketch anterior muere aca)
+      }, ms);
+    });
+  }
 
   // ---- Estado del hardware simulado --------------------------------------
   var pinState = {};      // pin -> valor PWM (0..255). digital HIGH=255 LOW=0
@@ -198,20 +213,12 @@
       // Tiempo
       millis: function () { return Date.now() - t0; },
       micros: function () { return (Date.now() - t0) * 1000; },
-      delay: async function (ms) {
-        ms = Math.max(0, ms | 0);
-        return new Promise(function(resolve) { setTimeout(resolve, ms); });
+      delay: function (ms) { return genSleep(Math.max(0, ms | 0)); },
+      delayMicroseconds: function (us) {
+        return genSleep(Math.max(1, Math.round((us || 0) / 1000)));
       },
-      delayMicroseconds: async function (us) {
-        var ms = Math.max(1, Math.round((us || 0) / 1000));
-        return new Promise(function(resolve) { setTimeout(resolve, ms); });
-      },
-      __yield: async function () {
-        return new Promise(function(resolve) { setTimeout(resolve, 0); });
-      },
-      yield: async function () {
-        return new Promise(function(resolve) { setTimeout(resolve, 0); });
-      },
+      __yield: function () { return genSleep(0); },
+      yield: function () { return genSleep(0); },
       // Math
       map: aMap, constrain: aConstrain,
       min: function (a, b) { return Math.min(a, b); },
@@ -363,6 +370,9 @@
 
   A.compile = function (userSrc) {
     program = null;
+    runGen++; // programa nuevo: los delays del anterior no deben resolver
+    setupRunning = false; setupError = null;
+    loopRunning = false; loopError = null;
     currentSource = String(userSrc || "");
     var T = global.Transpiler;
     if (!T) return { ok: false, error: { line: 0, message: "Transpiler no cargado", hint: "" } };
@@ -380,7 +390,10 @@
     try {
       factory = new Function("__env", body);
     } catch (e) {
-      var line = issue ? issue.line : (parseErrLine(e, PREAMBLE_LINES) || findLikelySourceLine(userSrc));
+      // SyntaxError de new Function: V8 NO pone la posicion del codigo
+      // compilado en el stack (solo el frame que llamo a new Function),
+      // asi que la heuristica sobre el fuente va primero.
+      var line = issue ? issue.line : (findLikelySourceLine(userSrc) || parseErrLine(e, PREAMBLE_LINES));
       var errorText = issue ? issue.text : (line ? sourceLine(userSrc, line) : "");
       return {
         ok: false,
@@ -408,6 +421,7 @@
   };
 
   function resetState() {
+    runGen++; // invalida delays pendientes de la corrida anterior
     pinState = {}; ultrasonic = {}; irValues = {};
     pendingRequest = null; consoleLines = []; consoleCur = "";
     t0 = Date.now();
@@ -446,13 +460,16 @@
 
     loopRunning = true;
     try {
+      var g = runGen;
       var p = program.loop();
       if (p && p.then) {
         p.then(function() {
-          loopRunning = false;
+          if (g === runGen) loopRunning = false;
         }, function(err) {
-          loopError = makeRuntimeError(err, "loop");
-          loopRunning = false;
+          if (g === runGen) {
+            loopError = makeRuntimeError(err, "loop");
+            loopRunning = false;
+          }
         });
       } else {
         loopRunning = false;
