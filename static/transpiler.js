@@ -379,6 +379,15 @@
     code = code.replace(/\b([A-Za-z_]\w*)\.toLowerCase\s*\(\s*\)\s*;/g, "$1 = String($1).toLowerCase();");
     code = code.replace(/\b([A-Za-z_]\w*)\.toUpperCase\s*\(\s*\)\s*;/g, "$1 = String($1).toUpperCase();");
     code = code.replace(/\b([A-Za-z_]\w*)\.trim\s*\(\s*\)\s*;/g, "$1 = String($1).trim();");
+    // Mutadores de String de Arduino (statement suelto): en C++ mutan in-place.
+    // replace() ademas reemplaza TODAS las ocurrencias (JS solo la primera).
+    // Solo mismo renglon ([^\n]) para no romper el mapa de lineas.
+    code = code.replace(/(^|[;{}])([ \t]*)([A-Za-z_]\w*)\.replace\s*\(([^\n]*?)\)\s*;/gm,
+                        "$1$2$3 = __replaceAll($3, $4);");
+    code = code.replace(/(^|[;{}])([ \t]*)([A-Za-z_]\w*)\.concat\s*\(([^\n]*?)\)\s*;/gm,
+                        "$1$2$3 = String($3) + ($4);");
+    code = code.replace(/(^|[;{}])([ \t]*)([A-Za-z_]\w*)\.remove\s*\(([^\n]*?)\)\s*;/gm,
+                        "$1$2$3 = __strRemove($3, $4);");
 
     code = insertAwaitsInFunctions(code, Object.keys(userFuncs));
 

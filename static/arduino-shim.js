@@ -143,14 +143,15 @@
   // Serial
   // -----------------------------------------------------------------------
   function fmt(x, base) {
+    if (typeof x === "number" && !Number.isInteger(x)) {
+      // Float: en Arduino el segundo argumento son DECIMALES, no base.
+      // print(3.14159, 2) -> "3.14"; sin argumento imprime 2 decimales.
+      return x.toFixed(base == null ? 2 : base);
+    }
     if (typeof x === "number" && base && base !== 10) {
       var v = Math.trunc(x);
-      if (v < 0 && base !== 10) v = v >>> 0;
+      if (v < 0) v = v >>> 0;
       return v.toString(base).toUpperCase();
-    }
-    if (typeof x === "number") {
-      // Arduino imprime floats con 2 decimales por defecto
-      return (Number.isInteger(x) ? String(x) : x.toFixed(2));
     }
     return String(x);
   }
@@ -200,7 +201,11 @@
       // IO
       pinMode: function () {},
       digitalWrite: function (pin, val) { setPin(pin, val ? 255 : 0); },
-      digitalRead: function (pin) { return (pinState[pin] || 0) > 127 ? 1 : 0; },
+      digitalRead: function (pin) {
+        // Sensor IR con salida digital (D0): negro=HIGH, blanco=LOW
+        if (irValues[pin] != null) return irValues[pin] > 512 ? 1 : 0;
+        return (pinState[pin] || 0) > 127 ? 1 : 0;
+      },
       analogWrite: function (pin, val) { setPin(pin, Math.max(0, Math.min(255, val | 0))); },
       analogRead: function (pin) { var v = irValues[pin]; return v == null ? 0 : v | 0; },
       analogReadResolution: function () {}, analogWriteResolution: function () {},
@@ -241,6 +246,12 @@
       highByte: function (v) { return (v >> 8) & 0xFF; },
       // Texto / util
       String: global.String,
+      // Helpers para mutadores de String de Arduino (los inyecta el transpiler)
+      __replaceAll: function (s, a, b) { return String(s).split(String(a)).join(String(b)); },
+      __strRemove: function (s, i, n) {
+        s = String(s);
+        return n == null ? s.substring(0, i) : s.substring(0, i) + s.substring(i + n);
+      },
       sizeof: function (x) { return (x && x.length) || 1; },
       constrainf: aConstrain,
       // Serial / WiFiS3
