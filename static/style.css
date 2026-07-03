@@ -271,6 +271,30 @@ h1 {
 .err-head { color: #f85149; font-weight: 700; font-size: 14px; }
 .err-head.clickable { cursor: pointer; text-decoration: underline dotted; }
 .err-hint { color: #d29922; margin-top: 6px; font-size: 13px; line-height: 1.5; }
+.err-item {
+  padding: 7px 9px;
+  margin-top: 8px;
+  background: rgba(1, 4, 9, 0.55);
+  border-left: 3px solid #f85149;
+  border-radius: 4px;
+  color: #e6edf3;
+  font-size: 13px;
+  line-height: 1.45;
+  cursor: pointer;
+}
+.err-item:hover { background: rgba(248, 81, 73, 0.12); }
+.err-item-line {
+  color: #f85149;
+  font-weight: 700;
+  font-family: 'Fira Code', 'Cascadia Code', Consolas, monospace;
+  margin-right: 4px;
+}
+.err-item .err-hint { margin-top: 4px; }
+.gutter .err-ln {
+  color: #f85149;
+  font-weight: 700;
+  background: rgba(248, 81, 73, 0.15);
+}
 .err-code {
   background: #010409;
   border-left: 3px solid #f85149;

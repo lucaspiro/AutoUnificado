@@ -80,17 +80,36 @@
       }
     });
   }
+  var errLines = [];   // lineas marcadas en rojo en el gutter
+
   function updateGutter() {
     var n = editor.value.split("\n").length;
     var html = "";
-    for (var i = 1; i <= n; i++) html += i + "\n";
-    gutter.textContent = html;
+    for (var i = 1; i <= n; i++) {
+      html += errLines.indexOf(i) >= 0
+        ? '<span class="err-ln">' + i + "</span>\n"
+        : i + "\n";
+    }
+    gutter.innerHTML = html;
+  }
+  function markErrLines(lines) {
+    errLines = lines || [];
+    updateGutter();
   }
 
   // ---- Compilacion ----
   async function compileAndLoad(silent, runSetup) {
     if (runSetup == null) runSetup = true;
     clearError();
+    // 1) Verificacion estilo compilador: si hay errores NO se ejecuta nada
+    if (window.Linter) {
+      var lintErrs = window.Linter.lint(editor.value);
+      if (lintErrs.length) {
+        if (!silent) showLintErrors(lintErrs);
+        return false;
+      }
+    }
+    // 2) Compilacion real (transpilador + new Function)
     var res = window.Arduino.compile(editor.value);
     if (!res.ok) { if (!silent) showError(res.error); return false; }
     if (!runSetup) return true;
@@ -174,10 +193,36 @@
     }
     goTab("code");
   }
+  // Lista de errores del verificador (estilo salida de compilador)
+  function showLintErrors(errs) {
+    var pnl = document.getElementById("errPanel");
+    var html = '<div class="err-head">❌ ' +
+      (errs.length === 1 ? "1 error de compilación" : errs.length + " errores de compilación") +
+      ' — corregí y volvé a Ejecutar</div>';
+    for (var i = 0; i < errs.length; i++) {
+      var e = errs[i];
+      html += '<div class="err-item clickable" data-line="' + e.line + '">' +
+        '<span class="err-item-line">línea ' + e.line + '</span> ' + esc(e.message) +
+        (e.hint ? '<div class="err-hint">💡 ' + esc(e.hint) + "</div>" : "") +
+        "</div>";
+    }
+    pnl.innerHTML = html;
+    pnl.style.display = "";
+    var items = pnl.querySelectorAll(".err-item");
+    for (var j = 0; j < items.length; j++) {
+      items[j].addEventListener("click", function () {
+        gotoLine(parseInt(this.getAttribute("data-line"), 10));
+      });
+    }
+    markErrLines(errs.map(function (e) { return e.line; }));
+    goTab("code");
+  }
+
   function clearError() {
     var pnl = document.getElementById("errPanel");
     pnl.style.display = "none";
     pnl.innerHTML = "";
+    markErrLines([]);
   }
   function gotoLine(n) {
     var lines = editor.value.split("\n");
