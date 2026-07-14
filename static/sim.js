@@ -172,9 +172,13 @@ window.Sim = (function () {
     var omega = (vL - vR) / (robot.w / CM) * 0.5;
     var nx = robot.x + Math.cos(robot.angle) * v * CM;
     var ny = robot.y + Math.sin(robot.angle) * v * CM;
-    // chequeo de colision en la trompa
-    var hx = nx + Math.cos(robot.angle) * (robot.h / 2);
-    var hy = ny + Math.sin(robot.angle) * (robot.h / 2);
+    // Colision en el punto que va ADELANTE del movimiento: la trompa si
+    // avanza, la COLA si retrocede. Sin esto, la marcha atras atravesaba
+    // los obstaculos y el robot quedaba incrustado (congelado para siempre,
+    // porque despues ninguna traslacion pasaba el chequeo de trompa).
+    var dir = (v >= 0) ? 1 : -1;
+    var hx = nx + Math.cos(robot.angle) * (robot.h / 2) * dir;
+    var hy = ny + Math.sin(robot.angle) * (robot.h / 2) * dir;
     if (!pointInObstacle(hx, hy)) { robot.x = nx; robot.y = ny; }
     robot.angle += omega;
   }
