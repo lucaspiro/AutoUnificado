@@ -30,12 +30,20 @@ window.ConfigUI = (function () {
     return el("label", { class: "cfg-field" }, [el("span", { text: label }), inp]);
   }
   function num(label, value, onCh) { return field(label, value, onCh, "number"); }
+  function check(label, value, onCh) {
+    var inp = el("input", { type: "checkbox", class: "cfg-chk" });
+    inp.checked = !!value;
+    inp.addEventListener("change", function () { onCh(inp.checked); });
+    return el("label", { class: "cfg-field" }, [el("span", { text: label }), inp]);
+  }
 
   // Defaults para configs viejas o incompletas
   function normalize(c) {
     c = c || {};
     c.motores = c.motores || {};
     c.motores.pins = c.motores.pins || { IN1: 5, IN2: 6, IN3: 10, IN4: 11 };
+    // Polaridad por motor: en un puente H "adelante" depende del cableado.
+    if (!c.motores.invertido) c.motores.invertido = { izq: false, der: false };
     c.ultrasonido = c.ultrasonido || {};
     c.ultrasonido.sensores = c.ultrasonido.sensores || [];
     c.infrarrojo = c.infrarrojo || {};
@@ -65,7 +73,12 @@ window.ConfigUI = (function () {
       num("IN3 (der adelante)", p.IN3, function (v) { p.IN3 = v; }),
       num("IN4 (der atrás)", p.IN4, function (v) { p.IN4 = v; })
     ]));
-    secM.appendChild(hint("Mismos pines que tu cableado real."));
+    var inv = cfg.motores.invertido;
+    secM.appendChild(grid([
+      check("Motor izq invertido", inv.izq, function (v) { inv.izq = v; }),
+      check("Motor der invertido", inv.der, function (v) { inv.der = v; })
+    ]));
+    secM.appendChild(hint("Mismos pines que tu cableado real. Si un lado gira al revés en el simulador, invertilo acá (sin tocar el sketch)."));
 
     // ---- Ultrasonido ----
     var secU = section("Ultrasonido");

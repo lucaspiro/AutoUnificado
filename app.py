@@ -17,6 +17,7 @@ import json
 import os
 import socket
 import sys
+import threading
 import time
 
 from flask import (
@@ -39,8 +40,17 @@ app = Flask(__name__, static_folder=None)
 # --------------------------------------------------------------------------
 estado = {
     "request": "",   # ultima linea HTTP recibida, ej "GET /adelante HTTP/1.1"
+    "id": 0,         # id del pedido: permite aparearlo con su respuesta
     "ts": 0.0,       # timestamp de cuando llego
 }
+
+# Respuestas del sketch (escritas con client.print/println en el simulador),
+# apareadas por id de pedido. El endpoint que genero el pedido espera aqui
+# hasta TIEMPO_RESPUESTA segundos y devuelve esos bytes como HTTP real.
+respuestas = {}
+_resp_lock = threading.Lock()
+_req_seq = [0]
+TIEMPO_RESPUESTA = 2.0
 
 # Config por defecto: solo hardware (que sensor/motor esta en que pin).
 # Velocidades, umbrales y variables viven en el codigo, como en el Arduino.
@@ -156,7 +166,22 @@ def sim_info():
 def sim_reset():
     estado["request"] = ""
     estado["ts"] = time.time()
+    with _resp_lock:
+        respuestas.clear()
     return jsonify(estado)
+
+
+@app.route("/__sim/respuesta", methods=["POST"])
+def sim_respuesta():
+    # El simulador web entrega la respuesta que el sketch escribio con
+    # client.print()/println(). Se apareara con el pedido por su id.
+    data = request.get_json(force=True, silent=True) or {}
+    rid = data.get("id")
+    body = data.get("body") or ""
+    if rid is not None:
+        with _resp_lock:
+            respuestas[rid] = str(body)
+    return jsonify({"ok": True})
 
 
 @app.route("/__sim/config", methods=["GET"])
@@ -198,6 +223,53 @@ def sim_config_import():
     return jsonify({"ok": True, "config": data})
 
 
+def _responder_http(raw):
+    """Convierte la respuesta cruda del sketch en una Response de Flask.
+
+    El sketch escribe la respuesta HTTP completa ("HTTP/1.1 200 OK",
+    "Content-Type: ...", body). Se respetan esos bytes: se extrae el
+    Content-Type y el body; si no hay cabeceras, se adivina por el contenido.
+    """
+    raw = raw.replace("\r\n", "\n")
+    if raw.startswith("HTTP/"):
+        head, _, body = raw.partition("\n\n")
+        ctype = "text/plain"
+        for ln in head.split("\n")[1:]:
+            k, _, v = ln.partition(":")
+            if k.strip().lower() == "content-type" and v.strip():
+                ctype = v.strip().split(";")[0]
+        return Response(body, mimetype=ctype)
+    limpio = raw.lstrip()
+    if limpio.startswith("{") or limpio.startswith("["):
+        return Response(raw, mimetype="application/json")
+    if "<html" in limpio.lower():
+        return Response(raw, mimetype="text/html")
+    return Response(raw, mimetype="text/plain")
+
+
+def _registrar_comando(full):
+    """Graba el pedido (lo poolea el simulador) y espera la respuesta del sketch."""
+    with _resp_lock:
+        _req_seq[0] += 1
+        rid = _req_seq[0]
+    estado["request"] = "GET " + full + " HTTP/1.1"
+    estado["id"] = rid
+    estado["ts"] = time.time()
+
+    # Espera activa hasta que el sketch responda (o timeout).
+    limite = time.time() + TIEMPO_RESPUESTA
+    while time.time() < limite:
+        with _resp_lock:
+            body = respuestas.pop(rid, None)
+        if body is not None:
+            return _responder_http(body)
+        time.sleep(0.02)
+
+    # Sin simulador corriendo (o sketch sin respuesta): respuesta generica,
+    # igual que antes de existir el round-trip.
+    return Response("OK\n", mimetype="text/plain")
+
+
 # --------------------------------------------------------------------------
 # Frontend estatico
 # --------------------------------------------------------------------------
@@ -207,9 +279,7 @@ def index():
     # no el home. Lo grabamos igual que cualquier ruta.
     qs = request.query_string.decode("utf-8", "ignore")
     if qs:
-        estado["request"] = "GET /?" + qs + " HTTP/1.1"
-        estado["ts"] = time.time()
-        return Response("OK\n", mimetype="text/plain")
+        return _registrar_comando("/?" + qs)
     return send_from_directory(STATIC_DIR, "index.html")
 
 
@@ -231,9 +301,7 @@ def comando(ruta):
     full = "/" + ruta
     if qs:
         full += "?" + qs
-    estado["request"] = "GET " + full + " HTTP/1.1"
-    estado["ts"] = time.time()
-    return Response("OK\n", mimetype="text/plain")
+    return _registrar_comando(full)
 
 
 # Caso especial: "/?X=..&Y=.." (joystick) cae en "/" con query string.
@@ -274,5 +342,6 @@ if __name__ == "__main__":
         print("=" * 52, flush=True)
 
     # Desactivamos el reloader de Flask para que no queden procesos zombis en Windows
-    # al cerrar la terminal con la X.
-    app.run(host="0.0.0.0", port=PORT, debug=True, use_reloader=False)
+    # al cerrar la terminal con la X. Threaded: mientras un pedido espera la
+    # respuesta del sketch, el resto (polling del sim, panel) tiene que seguir.
+    app.run(host="0.0.0.0", port=PORT, debug=True, use_reloader=False, threaded=True)
