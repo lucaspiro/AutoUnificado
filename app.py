@@ -48,6 +48,8 @@ estado = {
 # apareadas por id de pedido. El endpoint que genero el pedido espera aqui
 # hasta TIEMPO_RESPUESTA segundos y devuelve esos bytes como HTTP real.
 respuestas = {}
+solicitudes_activas = set()
+solicitudes_pendientes = []
 _resp_lock = threading.Lock()
 _req_seq = [0]
 TIEMPO_RESPUESTA = 2.0
@@ -149,7 +151,14 @@ def after(resp):
 # --------------------------------------------------------------------------
 @app.route("/__sim/estado", methods=["GET"])
 def sim_estado():
-    return jsonify(estado)
+    with _resp_lock:
+        while solicitudes_pendientes:
+            siguiente = solicitudes_pendientes.pop(0)
+            if siguiente["id"] in solicitudes_activas:
+                estado.update(siguiente)
+                break
+        snapshot = dict(estado)
+    return jsonify(snapshot)
 
 
 @app.route("/__sim/info", methods=["GET"])
@@ -168,6 +177,8 @@ def sim_reset():
     estado["ts"] = time.time()
     with _resp_lock:
         respuestas.clear()
+        solicitudes_activas.clear()
+        solicitudes_pendientes.clear()
     return jsonify(estado)
 
 
@@ -178,10 +189,14 @@ def sim_respuesta():
     data = request.get_json(force=True, silent=True) or {}
     rid = data.get("id")
     body = data.get("body") or ""
+    accepted = False
     if rid is not None:
         with _resp_lock:
-            respuestas[rid] = str(body)
-    return jsonify({"ok": True})
+            if rid in solicitudes_activas:
+                accepted = True
+            if accepted:
+                respuestas[rid] = str(body)
+    return jsonify({"ok": True, "accepted": accepted})
 
 
 @app.route("/__sim/config", methods=["GET"])
@@ -230,15 +245,27 @@ def _responder_http(raw):
     "Content-Type: ...", body). Se respetan esos bytes: se extrae el
     Content-Type y el body; si no hay cabeceras, se adivina por el contenido.
     """
-    raw = raw.replace("\r\n", "\n")
     if raw.startswith("HTTP/"):
-        head, _, body = raw.partition("\n\n")
+        if "\r\n\r\n" in raw:
+            head, body = raw.split("\r\n\r\n", 1)
+        else:
+            head, _, body = raw.partition("\n\n")
+        head_lines = head.splitlines()
+        status = 200
+        status_parts = (head_lines[0] if head_lines else "").split(None, 2)
+        if len(status_parts) >= 2:
+            try:
+                parsed_status = int(status_parts[1])
+                if 100 <= parsed_status <= 599:
+                    status = parsed_status
+            except ValueError:
+                pass
         ctype = "text/plain"
-        for ln in head.split("\n")[1:]:
+        for ln in head_lines[1:]:
             k, _, v = ln.partition(":")
             if k.strip().lower() == "content-type" and v.strip():
-                ctype = v.strip().split(";")[0]
-        return Response(body, mimetype=ctype)
+                ctype = v.strip()
+        return Response(body, status=status, content_type=ctype)
     limpio = raw.lstrip()
     if limpio.startswith("{") or limpio.startswith("["):
         return Response(raw, mimetype="application/json")
@@ -252,21 +279,32 @@ def _registrar_comando(full):
     with _resp_lock:
         _req_seq[0] += 1
         rid = _req_seq[0]
-    estado["request"] = "GET " + full + " HTTP/1.1"
-    estado["id"] = rid
-    estado["ts"] = time.time()
+        solicitudes_activas.add(rid)
+        pendiente = {
+            "request": "GET " + full + " HTTP/1.1",
+            "id": rid,
+            "ts": time.time(),
+        }
+        solicitudes_pendientes.append(pendiente)
 
     # Espera activa hasta que el sketch responda (o timeout).
     limite = time.time() + TIEMPO_RESPUESTA
     while time.time() < limite:
         with _resp_lock:
             body = respuestas.pop(rid, None)
+            if body is not None:
+                solicitudes_activas.discard(rid)
+                solicitudes_pendientes[:] = [p for p in solicitudes_pendientes if p["id"] != rid]
         if body is not None:
             return _responder_http(body)
         time.sleep(0.02)
 
     # Sin simulador corriendo (o sketch sin respuesta): respuesta generica,
     # igual que antes de existir el round-trip.
+    with _resp_lock:
+        solicitudes_activas.discard(rid)
+        respuestas.pop(rid, None)
+        solicitudes_pendientes[:] = [p for p in solicitudes_pendientes if p["id"] != rid]
     return Response("OK\n", mimetype="text/plain")
 
 

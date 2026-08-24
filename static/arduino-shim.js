@@ -122,12 +122,18 @@
   };
   WiFiClient.prototype.readString = function () { var s = this._buf; this._buf = ""; this._open = false; return s; };
   WiFiClient.prototype.peek = function () { return this._buf.length ? this._buf[0] : ""; };
-  WiFiClient.prototype.print = function (x) { this._out += (x == null ? "" : String(x)); };
-  WiFiClient.prototype.println = function (x) { this._out += (x == null ? "" : String(x)) + "\r\n"; };
-  WiFiClient.prototype.write = function (x) {
+  WiFiClient.prototype.print = function (x, base) { this._out += (x == null ? "" : fmt(x, base)); };
+  WiFiClient.prototype.println = function (x, base) { this._out += (x == null ? "" : fmt(x, base)) + "\r\n"; };
+  WiFiClient.prototype.write = function (x, size) {
+    if (Array.isArray(x) || (typeof ArrayBuffer !== "undefined" && ArrayBuffer.isView(x))) {
+      var count = Math.min(x.length, size == null ? x.length : Math.max(0, Number(size) || 0));
+      for (var i = 0; i < count; i++) this._out += String.fromCharCode(Number(x[i]) & 255);
+      return count;
+    }
     this._out += (typeof x === "number") ? String.fromCharCode(x & 255) : String(x);
+    return 1;
   };
-  WiFiClient.prototype.flush = function () { this._deliver(); };
+  WiFiClient.prototype.flush = function () {};
   WiFiClient.prototype.stop = function () { this._deliver(); this._open = false; };
   WiFiClient.prototype._deliver = function () {
     if (this._responded || !this._out) return;
@@ -142,8 +148,10 @@
   WiFiServer.prototype.available = function () {
     if (pendingRequest != null) {
       var line = pendingRequest;
+      var requestId = pendingRequestId;
       pendingRequest = null;
-      return new WiFiClient(line, pendingRequestId);
+      pendingRequestId = null;
+      return new WiFiClient(line, requestId);
     }
     return null; // falsy => if(client) salta
   };
@@ -167,7 +175,7 @@
   // Serial
   // -----------------------------------------------------------------------
   function fmt(x, base) {
-    if (typeof x === "number" && !Number.isInteger(x)) {
+    if (typeof x === "number" && (!Number.isInteger(x) || (base != null && (base < 2 || base > 36)))) {
       // Float: en Arduino el segundo argumento son DECIMALES, no base.
       // print(3.14159, 2) -> "3.14"; sin argumento imprime 2 decimales.
       return x.toFixed(base == null ? 2 : base);
@@ -319,15 +327,21 @@
     String.prototype.c_str = function () { return String(this); };
   }
   if (!String.prototype.toCharArray) {
-    // Copia hasta len caracteres al buffer (array). Rellena con 0 como C.
-    String.prototype.toCharArray = function (buf, len) {
-      var s = String(this);
-      for (var i = 0; i < len; i++) buf[i] = (i < s.length) ? s.charAt(i) : 0;
+    // Copia como maximo len-1 caracteres y siempre termina en NUL si hay lugar.
+    String.prototype.toCharArray = function (buf, len, index) {
+      var s = String(this).slice(Math.max(0, Number(index) || 0));
+      var capacity = Math.max(0, Number(len) || 0);
+      var count = Math.min(s.length, Math.max(0, capacity - 1));
+      for (var i = 0; i < count; i++) buf[i] = s.charAt(i);
+      if (capacity > 0) buf[count] = 0;
       return buf;
     };
-    String.prototype.getBytes = function (buf, len) {
-      var s = String(this);
-      for (var i = 0; i < len; i++) buf[i] = (i < s.length) ? s.charCodeAt(i) : 0;
+    String.prototype.getBytes = function (buf, len, index) {
+      var s = String(this).slice(Math.max(0, Number(index) || 0));
+      var capacity = Math.max(0, Number(len) || 0);
+      var count = Math.min(s.length, Math.max(0, capacity - 1));
+      for (var i = 0; i < count; i++) buf[i] = s.charCodeAt(i);
+      if (capacity > 0) buf[count] = 0;
       return buf;
     };
   }

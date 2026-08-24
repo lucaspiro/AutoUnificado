@@ -113,11 +113,15 @@ section("#2 init agregado de structs");
     "struct Step { int left; int right; unsigned int duration; };\n" +
     "const Step seq[] = { {100, 100, 200}, {-100, -100, 200} };\n" +
     "Step solo = {1, 2, 3};\n" +
+    "Step parcial = {7};\n" +
+    "Step vacio = {};\n" +
     "void setup() {}\nvoid loop() {}\n");
   ok(outContains(t.code, "{ left: 100, right: 100, duration: 200 }"),
     "array: cada elemento es objeto con campos", t.lines[1]);
   ok(outContains(t.code, "{ left: -100, right: -100, duration: 200 }"), "array: segundo elemento");
   ok(outContains(t.code, "solo = { left: 1, right: 2, duration: 3 }"), "escalar: objeto con campos", t.lines[2]);
+  ok(outContains(t.code, "parcial = { left: 7, right: 0, duration: 0 }"), "agregado parcial completa campos con cero", t.lines[3]);
+  ok(outContains(t.code, "vacio = { left: 0, right: 0, duration: 0 }"), "agregado vacio usa valores por defecto", t.lines[4]);
   ok(compileValid(t.code), "JS valido");
 })();
 
@@ -159,6 +163,31 @@ section("#4 parametros por referencia");
   ).then(function (res) {
     if (res.compileError || res.setupError) { ok(false, "runtime sin errores", res.compileError || res.setupError); return; }
     ok(res.console.length && res.console[0] === "42:true", "runtime: flag queda en true tras la llamada", res.console[0]);
+  });
+})();
+
+// Una llamada por referencia dentro de una condicion tambien debe copiar el
+// valor mutado al argumento original.
+(function () {
+  return runSketch(
+    "bool flag = false;\n" +
+    "bool setFlag(bool &value) { value = true; return value; }\n" +
+    "void setup() {\n  if (setFlag(flag)) { Serial.println(flag); }\n}\nvoid loop() {}\n"
+  ).then(function (res) {
+    if (res.compileError || res.setupError) { ok(false, "ref en expresion corre", res.compileError || res.setupError); return; }
+    ok(res.console[0] === "true", "runtime: ref en expresion copia de vuelta", res.console[0]);
+  });
+})();
+
+// El rewriter debe procesar mas de una llamada por referencia en la misma linea.
+(function () {
+  return runSketch(
+    "bool a = false; bool b = false;\n" +
+    "bool setBoth(bool &value) { value = true; return value; }\n" +
+    "void setup() {\n  if (setBoth(a) && setBoth(b)) { Serial.print(a); Serial.print(\":\"); Serial.println(b); }\n}\nvoid loop() {}\n"
+  ).then(function (res) {
+    if (res.compileError || res.setupError) { ok(false, "dos refs en expresion corren", res.compileError || res.setupError); return; }
+    ok(res.console[0] === "true:true", "runtime: dos refs en la misma expresion", res.console[0]);
   });
 })();
 
@@ -229,6 +258,12 @@ section("#8 String de Arduino");
   ok(typeof String.prototype.toCharArray === "function", "prototype.toCharArray existe");
   ok(typeof String.prototype.getBytes === "function", "prototype.getBytes existe");
   ok(typeof String.prototype.compareTo === "function", "prototype.compareTo existe");
+  var chars = [9, 9, 9, 9];
+  "ABCDE".toCharArray(chars, 4);
+  ok(chars.join(",") === "A,B,C,0", "toCharArray reserva espacio para terminador NUL", chars.join(","));
+  var bytes = [9, 9, 9, 9];
+  "ABCDE".getBytes(bytes, 4);
+  ok(bytes.join(",") === "65,66,67,0", "getBytes reserva espacio para terminador NUL", bytes.join(","));
   return runSketch(
     "String a = \"hola\";\n" +
     "void setup() {\n" +
@@ -368,6 +403,32 @@ section("#13 WiFiClient -> respuesta HTTP real");
 /* -------------------------------------------------------------------------
  * 14. polaridad de motores por lado (config)
  * ------------------------------------------------------------------------- */
+section("#13b WiFiClient compatibilidad Print");
+(function () {
+  var src =
+    "WiFiServer server(80);\n" +
+    "void setup() { server.begin(); }\n" +
+    "void loop() {\n" +
+    "  WiFiClient client = server.available();\n" +
+    "  if (client) {\n" +
+    "    byte data[] = {65, 66, 67};\n" +
+    "    client.print(255, 16); client.print(\":\"); client.print(3.14159, 2);\n" +
+    "    client.flush();\n" +
+    "    client.write(data, 2); client.stop();\n" +
+    "  }\n" +
+    "}\n";
+  return serial(function () {
+    var delivered = null;
+    return runSketchInner(src, 10, function () {
+      A.onResponse = function (resp) { delivered = resp; };
+      A.setRequest("GET / HTTP/1.1", 101);
+    }).then(function (res) {
+      if (res.compileError || res.loopError) { ok(false, "runtime WiFiClient", res.compileError || res.loopError); return; }
+      ok(delivered && delivered.body === "FF:3.14AB", "print(base/precision), flush y write(buffer,size)", delivered && delivered.body);
+    });
+  });
+})();
+
 section("#14 polaridad de motores");
 (function () {
   return serial(function () {

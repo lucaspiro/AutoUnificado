@@ -219,12 +219,15 @@
     var fields = [];
     splitTop(body, ";").forEach(function (f) {
       f = f.trim(); if (!f) return;
+      var isStr = /\b(String|char)\b/.test(f);
+      var isBool = /\b(bool|boolean)\b/.test(f);
+      var defaultValue = isStr ? '""' : (isBool ? "false" : "0");
       f = f.split("=")[0]; // sin valores por defecto
       splitTop(f, ",").forEach(function (d) {
         d = d.trim(); if (!d) return;
         var toks = d.split(/\s+/);
         var nm = (toks[toks.length - 1] || "").split("[")[0].replace(/[*&]/g, "").trim();
-        if (/^[A-Za-z_]\w*$/.test(nm)) fields.push(nm);
+        if (/^[A-Za-z_]\w*$/.test(nm)) fields.push({ name: nm, defaultValue: defaultValue });
       });
     });
     return fields;
@@ -260,14 +263,17 @@
     splitTop(inner, ",").forEach(function (p) {
       p = p.trim(); if (p) vals.push(p);
     });
-    if (!vals.length) return rhs;
     function obj(partsArr) {
       var o = [];
-      for (var k = 0; k < partsArr.length && k < fields.length; k++) {
-        o.push(fields[k] + ": " + partsArr[k]);
+      for (var k = 0; k < fields.length; k++) {
+        var field = fields[k];
+        var fieldName = typeof field === "string" ? field : field.name;
+        var fieldDefault = typeof field === "string" ? "0" : field.defaultValue;
+        o.push(fieldName + ": " + (k < partsArr.length ? partsArr[k] : fieldDefault));
       }
       return "{ " + o.join(", ") + " }";
     }
+    if (!vals.length) return obj([]);
     var nested = false;
     for (var j = 0; j < vals.length; j++) {
       if (vals[j].charAt(0) === "{") { nested = true; break; }
@@ -653,9 +659,8 @@
       rewriteRefUses(first.slice(closeIdx + 1), names);
   }
 
-  // Reescritura de una EXPRESION: envuelve inline con __ref(...) las llamadas
-  // a funciones con parametros por referencia (sin copy-back: en una expresion
-  // no hay donde copiar; los casos del repertorio comun no mutan el argumento).
+  // Reescritura de una EXPRESION anidada. El copy-back de lvalues lo resuelve
+  // makeRefCallRewriter con una IIFE async; aca se cubren argumentos anidados.
   // Los argumentos que ya son wrappers (params por referencia del ambito)
   // se pasan tal cual: comparten el objeto y las mutaciones se propagan solas.
   function makeExprRefRewriter(refFuncs) {
@@ -701,7 +706,7 @@
   //    se envuelve con una variable temporal y se copia de vuelta:
   //      var __refN = __ref(arg); x = f(a, __refN); arg = __refN.v;
   //  - llamadas en EXPRESION (dentro de una condicion, de otro argumento...):
-  //    se envuelven inline con __ref(...) sin copy-back.
+  //    una IIFE async conserva el resultado y copia los lvalues de vuelta.
   // Los argumentos que ya son wrappers (refs del ambito exterior) no se
   // envuelven: al ser el mismo objeto, las mutaciones del callee se propagan.
   function makeRefCallRewriter(refFuncs) {
@@ -744,6 +749,7 @@
           }
         }
         if (!changed) continue;
+        var continueScan = false;
         if (stmtCtx) {
           var st = nameStart - 1;
           while (st >= 0 && ";{}".indexOf(line.charAt(st)) < 0) st--;
@@ -752,10 +758,31 @@
             line.slice(stmtStart, nameStart) + mm[1] + "(" + args.join(",") + ")" +
             line.slice(closeIdx + 1) + unwraps.join(" ");
         } else {
-          line = line.slice(0, nameStart) + mm[1] + "(" + args.join(",") + ")" +
-            line.slice(closeIdx + 1);
+          var exprWraps = [], exprUnwraps = [];
+          for (var ew = 0; ew < info.indices.length; ew++) {
+            var eai = info.indices[ew];
+            if (eai >= args.length) continue;
+            var original = splitTop(line.slice(openIdx + 1, closeIdx), ",")[eai].trim();
+            if (!/^[A-Za-z_]\w*(\.[A-Za-z_]\w*|\[[^\[\]]+\])?$/.test(original)) continue;
+            var evname = "__ref" + (++counter);
+            args[eai] = evname;
+            exprWraps.push("var " + evname + " = __ref(" + original + ");");
+            exprUnwraps.push(original + " = " + evname + ".v;");
+          }
+          if (exprWraps.length) {
+            var retname = "__refResult" + counter;
+            var wrapped = "(await (async function(){" + exprWraps.join(" ") +
+              " var " + retname + " = await " + mm[1] + "(" + args.join(",") + "); " +
+              exprUnwraps.join(" ") + " return " + retname + ";})())";
+            line = line.slice(0, nameStart) + wrapped + line.slice(closeIdx + 1);
+            callRe.lastIndex = nameStart + wrapped.length;
+            continueScan = true;
+          } else {
+            line = line.slice(0, nameStart) + mm[1] + "(" + args.join(",") + ")" +
+              line.slice(closeIdx + 1);
+          }
         }
-        // una reescritura por linea es suficiente para el repertorio cubierto
+        if (continueScan) continue;
         break;
       }
       return line;
