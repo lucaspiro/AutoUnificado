@@ -47,11 +47,15 @@
   var ultrasonic = {};    // echoPin -> distancia cm (o grande si libre)
   var irValues = {};      // pin (ej "A0") -> 0..1023
   var pendingRequest = null; // ultima linea HTTP no consumida
+  var pendingRequestId = null; // id del pedido (para aparear la respuesta)
   var consoleLines = [];  // salida Serial
   var consoleCur = "";
 
   // ---- Mapa de pines (de la config) --------------------------------------
   var motorPins = { leftFwd: 5, leftBack: 6, rightFwd: 10, rightBack: 11 };
+  // Polaridad por motor (#14): en un puente H "adelante" depende del
+  // cableado fisico. La config permite invertir cada lado sin tocar el sketch.
+  var motorInvert = { left: false, right: false };
 
   // ---- Constantes Arduino -------------------------------------------------
   var CONST = {
@@ -61,6 +65,7 @@
     A0: "A0", A1: "A1", A2: "A2", A3: "A3", A4: "A4", A5: "A5",
     A6: "A6", A7: "A7",
     WL_AP_LISTENING: 7, WL_CONNECTED: 3, WL_IDLE_STATUS: 0, WL_NO_SHIELD: 255,
+    WIFI_FIRMWARE_LATEST_VERSION: "1.0.0",
     PI: Math.PI, HALF_PI: Math.PI / 2, TWO_PI: Math.PI * 2, DEG_TO_RAD: Math.PI / 180,
     RAD_TO_DEG: 180 / Math.PI, EULER: Math.E
   };
@@ -75,9 +80,11 @@
     var lb = pinState[motorPins.leftBack] || 0;
     var rf = pinState[motorPins.rightFwd] || 0;
     var rb = pinState[motorPins.rightBack] || 0;
+    var left = clampPWM(lf - lb);
+    var right = clampPWM(rf - rb);
     return {
-      left: clampPWM(lf - lb),
-      right: clampPWM(rf - rb)
+      left: motorInvert.left ? -left : left,
+      right: motorInvert.right ? -right : right
     };
   }
   function clampPWM(v) { return Math.max(-255, Math.min(255, v)); }
@@ -85,9 +92,16 @@
   // -----------------------------------------------------------------------
   // Stubs de WiFiS3
   // -----------------------------------------------------------------------
-  function WiFiClient(line) {
+  // El cliente acumula EXACTAMENTE los bytes escritos con print()/println()/
+  // write(): al cerrarse (stop), esa respuesta se entrega al simulador via
+  // Arduino.onResponse({ id, body }) y el backend la devuelve como respuesta
+  // HTTP real (#13). `id` identifica el pedido al que responde.
+  function WiFiClient(line, reqId) {
     this._buf = (line != null) ? (line + "\r\n\r\n") : "";
     this._open = true;
+    this._out = "";
+    this._reqId = (reqId == null) ? null : reqId;
+    this._responded = false;
   }
   WiFiClient.prototype.connected = function () { return this._open && this._buf.length > 0; };
   WiFiClient.prototype.available = function () { return this._buf.length; };
@@ -108,19 +122,36 @@
   };
   WiFiClient.prototype.readString = function () { var s = this._buf; this._buf = ""; this._open = false; return s; };
   WiFiClient.prototype.peek = function () { return this._buf.length ? this._buf[0] : ""; };
-  WiFiClient.prototype.print = function () {};
-  WiFiClient.prototype.println = function () {};
-  WiFiClient.prototype.write = function () {};
+  WiFiClient.prototype.print = function (x, base) { this._out += (x == null ? "" : fmt(x, base)); };
+  WiFiClient.prototype.println = function (x, base) { this._out += (x == null ? "" : fmt(x, base)) + "\r\n"; };
+  WiFiClient.prototype.write = function (x, size) {
+    if (Array.isArray(x) || (typeof ArrayBuffer !== "undefined" && ArrayBuffer.isView(x))) {
+      var count = Math.min(x.length, size == null ? x.length : Math.max(0, Number(size) || 0));
+      for (var i = 0; i < count; i++) this._out += String.fromCharCode(Number(x[i]) & 255);
+      return count;
+    }
+    this._out += (typeof x === "number") ? String.fromCharCode(x & 255) : String(x);
+    return 1;
+  };
   WiFiClient.prototype.flush = function () {};
-  WiFiClient.prototype.stop = function () { this._open = false; };
+  WiFiClient.prototype.stop = function () { this._deliver(); this._open = false; };
+  WiFiClient.prototype._deliver = function () {
+    if (this._responded || !this._out) return;
+    this._responded = true;
+    if (A.onResponse && this._reqId != null) {
+      A.onResponse({ id: this._reqId, body: this._out });
+    }
+  };
 
   function WiFiServer(port) { this.port = port; }
   WiFiServer.prototype.begin = function () {};
   WiFiServer.prototype.available = function () {
     if (pendingRequest != null) {
       var line = pendingRequest;
+      var requestId = pendingRequestId;
       pendingRequest = null;
-      return new WiFiClient(line);
+      pendingRequestId = null;
+      return new WiFiClient(line, requestId);
     }
     return null; // falsy => if(client) salta
   };
@@ -136,14 +167,15 @@
     status: function () { return CONST.WL_AP_LISTENING; },
     config: function () {}, RSSI: function () { return -50; },
     SSID: function () { return "Sim_AP"; }, disconnect: function () {},
-    macAddress: function () { return "00:00:00:00:00:00"; }
+    macAddress: function () { return "00:00:00:00:00:00"; },
+    firmwareVersion: function () { return "1.0.0"; }
   };
 
   // -----------------------------------------------------------------------
   // Serial
   // -----------------------------------------------------------------------
   function fmt(x, base) {
-    if (typeof x === "number" && !Number.isInteger(x)) {
+    if (typeof x === "number" && (!Number.isInteger(x) || (base != null && (base < 2 || base > 36)))) {
       // Float: en Arduino el segundo argumento son DECIMALES, no base.
       // print(3.14159, 2) -> "3.14"; sin argumento imprime 2 decimales.
       return x.toFixed(base == null ? 2 : base);
@@ -252,6 +284,9 @@
         s = String(s);
         return n == null ? s.substring(0, i) : s.substring(0, i) + s.substring(i + n);
       },
+      // Wrapper para parametros por referencia C++ (#4): el transpiler envuelve
+      // el argumento al llamar y copia de vuelta .v despues de la llamada.
+      __ref: function (x) { return { v: x }; },
       sizeof: function (x) { return (x && x.length) || 1; },
       constrainf: aConstrain,
       // Serial / WiFiS3
@@ -275,6 +310,40 @@
     String.prototype.equals = function (o) { return String(this) === String(o); };
     String.prototype.equalsIgnoreCase = function (o) { return String(this).toLowerCase() === String(o).toLowerCase(); };
     String.prototype.toLowerCaseAr = function () { return this.toLowerCase(); };
+  }
+  // Metodos extra de String de Arduino (#8). Algunos existen nativos con la
+  // misma firma (indexOf, substring, charAt, startsWith, endsWith, trim);
+  // estos faltaban o se comportan distinto:
+  if (!String.prototype.reserve) {
+    String.prototype.reserve = function () {}; // en JS no hay buffer preasignado
+  }
+  if (!String.prototype.compareTo) {
+    String.prototype.compareTo = function (o) {
+      var a = String(this), b = String(o);
+      return a < b ? -1 : (a > b ? 1 : 0);
+    };
+  }
+  if (!String.prototype.c_str) {
+    String.prototype.c_str = function () { return String(this); };
+  }
+  if (!String.prototype.toCharArray) {
+    // Copia como maximo len-1 caracteres y siempre termina en NUL si hay lugar.
+    String.prototype.toCharArray = function (buf, len, index) {
+      var s = String(this).slice(Math.max(0, Number(index) || 0));
+      var capacity = Math.max(0, Number(len) || 0);
+      var count = Math.min(s.length, Math.max(0, capacity - 1));
+      for (var i = 0; i < count; i++) buf[i] = s.charAt(i);
+      if (capacity > 0) buf[count] = 0;
+      return buf;
+    };
+    String.prototype.getBytes = function (buf, len, index) {
+      var s = String(this).slice(Math.max(0, Number(index) || 0));
+      var capacity = Math.max(0, Number(len) || 0);
+      var count = Math.min(s.length, Math.max(0, capacity - 1));
+      for (var i = 0; i < count; i++) buf[i] = s.charCodeAt(i);
+      if (capacity > 0) buf[count] = 0;
+      return buf;
+    };
   }
 
   // -----------------------------------------------------------------------
@@ -434,7 +503,8 @@
   function resetState() {
     runGen++; // invalida delays pendientes de la corrida anterior
     pinState = {}; ultrasonic = {}; irValues = {};
-    pendingRequest = null; consoleLines = []; consoleCur = "";
+    pendingRequest = null; pendingRequestId = null;
+    consoleLines = []; consoleCur = "";
     t0 = Date.now();
     setupRunning = false; setupError = null;
     loopRunning = false; loopError = null;
@@ -500,9 +570,17 @@
       var p = cfg.motores.pins;
       motorPins = { leftFwd: p.IN1, leftBack: p.IN2, rightFwd: p.IN3, rightBack: p.IN4 };
     } catch (e) { /* config incompleta: deja default */ }
+    try {
+      var inv = (cfg.motores && cfg.motores.invertido) || {};
+      motorInvert = { left: !!inv.izq, right: !!inv.der };
+    } catch (e2) { /* sin polaridad explicita: no invertir */ }
   };
 
-  A.setRequest = function (line) { pendingRequest = line; };
+  A.setRequest = function (line, id) {
+    pendingRequest = line;
+    pendingRequestId = (id == null) ? null : id;
+  };
+  A.onResponse = null; // lo setea sim.js: entrega la respuesta HTTP del sketch
   A.setLocalIP = function (ip) { if (ip) localIP = ip; };
   A.setUltrasonic = function (echoPin, distCm) { ultrasonic[echoPin] = distCm; };
   A.setIR = function (pin, val) { irValues[pin] = val; };

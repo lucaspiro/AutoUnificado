@@ -191,7 +191,7 @@ window.Sim = (function () {
       if (d.ts !== lastTs) {
         lastTs = d.ts;
         if (d.request) {
-          window.Arduino.setRequest(d.request);
+          window.Arduino.setRequest(d.request, d.id);
           if (api.onRequest) api.onRequest(d.request);
         }
       }
@@ -528,7 +528,20 @@ window.Sim = (function () {
   // -----------------------------------------------------------------------
   // API publica
   // -----------------------------------------------------------------------
-  api.init = function () { if (!p5i) p5i = new p5(sketch); };
+  api.init = function () {
+    // La respuesta que el sketch escribe con client.print()/println() viaja
+    // de vuelta al backend para entregarse como HTTP real (#13).
+    if (window.Arduino) {
+      window.Arduino.onResponse = function (resp) {
+        fetch("/__sim/respuesta", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(resp)
+        }).catch(function () {});
+      };
+    }
+    if (!p5i) p5i = new p5(sketch);
+  };
   api.setConfig = function (c) { cfg = c; if (window.Arduino) window.Arduino.configure(c); };
   api.start = function () { running = true; lastTs = -1; };
   api.pause = function () { running = false; };

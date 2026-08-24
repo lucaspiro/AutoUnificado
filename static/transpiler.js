@@ -212,21 +212,97 @@
     return "const " + parts.join(", ") + ";";
   }
 
-  // struct -> factory __make_Nombre()
-  function structFactory(name, body) {
+  // Nombres de campo de un cuerpo de struct, en orden de declaracion.
+  // Soporta tipos compuestos ("unsigned int duration", "const char *nombre")
+  // y multiples declaradores ("int a, b"): el nombre es el ULTIMO token.
+  function structFieldNames(body) {
     var fields = [];
     splitTop(body, ";").forEach(function (f) {
       f = f.trim(); if (!f) return;
-      // "int a, b" / "float x" / "String s"
-      var tm = f.match(/^[\w\s\*&]+?\s+([\s\S]+)$/);
-      if (!tm) return;
-      var isStr = /\b(String|char)\b/.test(f.split(/\s+/)[0] || f);
-      splitTop(tm[1], ",").forEach(function (nm) {
-        nm = nm.replace(/[\*&\[\]0-9]/g, "").trim();
-        if (nm) fields.push(nm + ": " + (isStr ? '""' : "0"));
+      var isStr = /\b(String|char)\b/.test(f);
+      var isBool = /\b(bool|boolean)\b/.test(f);
+      var defaultValue = isStr ? '""' : (isBool ? "false" : "0");
+      f = f.split("=")[0]; // sin valores por defecto
+      splitTop(f, ",").forEach(function (d) {
+        d = d.trim(); if (!d) return;
+        var toks = d.split(/\s+/);
+        var nm = (toks[toks.length - 1] || "").split("[")[0].replace(/[*&]/g, "").trim();
+        if (/^[A-Za-z_]\w*$/.test(nm)) fields.push({ name: nm, defaultValue: defaultValue });
       });
     });
-    return "function __make_" + name + "(){ return { " + fields.join(", ") + " }; }";
+    return fields;
+  }
+
+  // struct -> factory __make_Nombre()
+  function structFactory(name, body) {
+    var inits = [];
+    splitTop(body, ";").forEach(function (f) {
+      f = f.trim(); if (!f) return;
+      var isStr = /\b(String|char)\b/.test(f);
+      var isBool = /\b(bool|boolean)\b/.test(f);
+      f = f.split("=")[0];
+      splitTop(f, ",").forEach(function (d) {
+        d = d.trim(); if (!d) return;
+        var toks = d.split(/\s+/);
+        var nm = (toks[toks.length - 1] || "").split("[")[0].replace(/[*&]/g, "").trim();
+        if (!/^[A-Za-z_]\w*$/.test(nm)) return;
+        inits.push(nm + ": " + (isStr ? '""' : (isBool ? "false" : "0")));
+      });
+    });
+    return "function __make_" + name + "(){ return { " + inits.join(", ") + " }; }";
+  }
+
+  // Inicializacion agregada C++ -> literal JS con campos nombrados.
+  // "{100, 100, 200}"            -> "{ left: 100, right: 100, duration: 200 }"
+  // "{{1,1,2},{-1,-1,2}}"        -> "[ { left: 1, ... }, { left: -1, ... } ]"
+  function structInitToJS(rhs, fields) {
+    var t = String(rhs).trim();
+    if (!fields || !fields.length || t.charAt(0) !== "{") return rhs;
+    var inner = t.slice(1, t.length - 1);
+    var vals = [];
+    splitTop(inner, ",").forEach(function (p) {
+      p = p.trim(); if (p) vals.push(p);
+    });
+    function obj(partsArr) {
+      var o = [];
+      for (var k = 0; k < fields.length; k++) {
+        var field = fields[k];
+        var fieldName = typeof field === "string" ? field : field.name;
+        var fieldDefault = typeof field === "string" ? "0" : field.defaultValue;
+        o.push(fieldName + ": " + (k < partsArr.length ? partsArr[k] : fieldDefault));
+      }
+      return "{ " + o.join(", ") + " }";
+    }
+    if (!vals.length) return obj([]);
+    var nested = false;
+    for (var j = 0; j < vals.length; j++) {
+      if (vals[j].charAt(0) === "{") { nested = true; break; }
+    }
+    if (!nested) return obj(vals);
+    var outs = [];
+    for (var q = 0; q < vals.length; q++) {
+      var v = vals[q];
+      if (v.charAt(0) !== "{") { outs.push(v); continue; }
+      var parts = [];
+      splitTop(v.slice(1, v.length - 1), ",").forEach(function (s) {
+        s = s.trim(); if (s) parts.push(s);
+      });
+      outs.push(obj(parts));
+    }
+    return "[ " + outs.join(", ") + " ]";
+  }
+
+  // Indice del ')' que cierra el '(' en openIdx (-1 si no cierra en esta linea).
+  function matchParen(s, openIdx) {
+    var depth = 0, q = null;
+    for (var p = openIdx; p >= 0 && p < s.length; p++) {
+      var c = s[p];
+      if (q) { if (c === "\\") p++; else if (c === q) q = null; continue; }
+      if (c === '"' || c === "'" || c === "`") { q = c; continue; }
+      if (c === "(") depth++;
+      else if (c === ")") { depth--; if (depth === 0) return p; }
+    }
+    return -1;
   }
 
   // -----------------------------------------------------------------------
@@ -235,15 +311,34 @@
   function transpile(src) {
     var knownTypes = {};   // enum/struct/class/typedef names -> "let" o "make"
     var structNames = {};  // name -> true
+    var structFields = {}; // name -> [campos en orden] (para init agregado)
     var userFuncs = { delay: 1, delayMicroseconds: 1, yield: 1 };
 
     var text = String(src).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
     text = stripComments(text);
     text = preprocess(text);
 
-    // F("...") -> "..."  ;  PROGMEM / PSTR fuera
-    text = text.replace(/\bF\s*\(\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')\s*\)/g, "$1");
-    text = text.replace(/\bPSTR\s*\(\s*("(?:[^"\\]|\\.)*")\s*\)/g, "$1");
+    // F("...") / PSTR("...") -> "..."  ;  PROGMEM / PSTR fuera.
+    // C++ concatena literales adyacentes (tambien multilinea):
+    //   F("<html>"  "<body>"  "Hello")  ->  "<html><body>Hello"
+    var STRLIT = "(?:\"(?:[^\"\\\\]|\\\\.)*\"|'(?:[^'\\\\]|\\\\.)*')";
+    var flashRe = new RegExp(
+      "\\b(F|PSTR)\\s*\\(\\s*(" + STRLIT + "(?:\\s+" + STRLIT + ")*)\\s*\\)", "g");
+    text = text.replace(flashRe, function (m, fn, inner) {
+      var parts = [], soloChars = false;
+      var rest = inner.replace(new RegExp(STRLIT, "g"), function (s) {
+        if (s.charAt(0) === "'") soloChars = true;
+        parts.push(s);
+        return "";
+      });
+      // Si queda algo que no sea espacio entre literales, no es concatenacion.
+      if (/\S/.test(rest) || soloChars) return m;
+      var repl = "\"" + parts.map(function (p) { return p.slice(1, -1); }).join("") + "\"";
+      // Preservar lineas (mapa de lineas identidad): lo que sobra en blanco.
+      var falta = countNL(m) - countNL(repl);
+      if (falta > 0) repl += new Array(falta + 1).join("\n");
+      return repl;
+    });
     text = text.replace(/\bPROGMEM\b/g, "");
 
     // Sufijos numericos enteros/float: 8000UL -> 8000, 2.5f -> 2.5
@@ -278,9 +373,17 @@
 
     // typedef struct / struct
     text = text.replace(/\btypedef\s+struct\b[^{]*\{([^}]*)\}\s*(\w+)\s*;/g,
-      function (m, body, name) { knownTypes[name] = "make"; structNames[name] = true; return structFactory(name, body) + padNL(m); });
+      function (m, body, name) {
+        knownTypes[name] = "make"; structNames[name] = true;
+        structFields[name] = structFieldNames(body);
+        return structFactory(name, body) + padNL(m);
+      });
     text = text.replace(/\bstruct\s+(\w+)\s*\{([^}]*)\}\s*;/g,
-      function (m, name, body) { knownTypes[name] = "make"; structNames[name] = true; return structFactory(name, body) + padNL(m); });
+      function (m, name, body) {
+        knownTypes[name] = "make"; structNames[name] = true;
+        structFields[name] = structFieldNames(body);
+        return structFactory(name, body) + padNL(m);
+      });
 
     // class Nombre { ... };  (brace-matched, best-effort)
     text = transformClasses(text, knownTypes);
@@ -293,7 +396,7 @@
       "((?:\\s+(?:unsigned|signed|long|short|int|double))*)\\s*([*&]*)\\s*([A-Za-z_][\\s\\S]*)$"
     );
     var funcRe = new RegExp(
-      "^(\\s*)((?:" + MOD + "\\s+)*(?:" + baseList + ")\\b(?:\\s+(?:unsigned|signed|long|short|int|double))*\\s*[*&]*)\\s+" +
+      "^(\\s*)((?:" + MOD + "\\s+)*(?:" + baseList + ")\\b(?:\\s+(?:unsigned|signed|long|short|int|double))*\\s*[*&]*)\\s*" +
       "([A-Za-z_]\\w*)\\s*\\("
     );
     var CONTROL = { "if": 1, "for": 1, "while": 1, "switch": 1, "return": 1, "else": 1, "do": 1, "sizeof": 1 };
@@ -321,19 +424,36 @@
     });
 
     var tmpLines = text.split("\n");
+    // Pre-scan: nombres de funciones del usuario + funciones con parametros
+    // por referencia (C++ "T &nombre"), que necesitan reescritura (#4).
+    var refFuncs = {}; // nombre -> { indices: [pos], nombres: [param] }
     for (var k = 0; k < tmpLines.length; k++) {
       var fm = tmpLines[k].match(funcRe);
-      if (fm && !CONTROL[fm[3]]) {
-        userFuncs[fm[3]] = 1;
+      if (!fm || CONTROL[fm[3]]) continue;
+      userFuncs[fm[3]] = 1;
+      var sigScan = tmpLines[k], jScan = k;
+      while (balance(sigScan) > 0 && jScan + 1 < tmpLines.length) {
+        jScan++; sigScan += "\n" + tmpLines[jScan];
       }
+      var opScan = sigScan.indexOf("(");
+      var clScan = matchParen(sigScan, opScan);
+      if (clScan < 0) continue;
+      var idxs = [], nms = [];
+      splitTop(sigScan.slice(opScan + 1, clScan), ",").forEach(function (par, ix) {
+        var mr = par.replace(/\n/g, " ").match(/&\s*([A-Za-z_]\w*)/);
+        if (mr) { idxs.push(ix); nms.push(mr[1]); }
+      });
+      if (idxs.length) refFuncs[fm[3]] = { indices: idxs, nombres: nms };
     }
 
     // Procesar linea por linea (preservando cantidad de lineas)
     var lines = text.split("\n");
     var out = new Array(lines.length);
     var staticMaps = {};
+    var lineRefNames = new Array(lines.length); // refs del cuerpo al que pertenece la linea
     var i = 0;
     var currentFunc = null, funcDepth = 0;
+    var curRefNames = null; // params por referencia de la funcion actual
     while (i < lines.length) {
       var line = lines[i];
       // ---- Definicion de funcion (posible firma multilinea) ----
@@ -346,7 +466,17 @@
           out[i] = res.first;
           for (var k = i + 1; k <= j; k++) out[k] = "";
           var d = braceDelta(res.first);
-          if (res.name && d > 0) { currentFunc = res.name; funcDepth = d; }
+          if (res.name && d > 0) {
+            currentFunc = res.name; funcDepth = d;
+            curRefNames = refFuncs[res.name] ? refFuncs[res.name].nombres : null;
+          }
+          if (res.name && refFuncs[res.name]) {
+            // El cuerpo puede venir pegado a la firma en la misma linea:
+            // se aplica ".v" solo despues del cierre de los parametros.
+            out[i] = applyRefInBody(out[i], refFuncs[res.name].nombres);
+            if (d <= 0) curRefNames = null;
+          }
+          lineRefNames[i] = null; // la linea de firma no lleva ".v" en el post-paso
           // si el cuerpo seguia en la misma ultima linea, va incluido en res.first
           i = j + 1;
           continue;
@@ -355,25 +485,99 @@
       // ---- Declaracion de variable ----
       var dm = line.match(typeRe);
       if (dm && !CONTROL[(line.trim().split(/\s+/)[0])]) {
-        var conv = transformDecl(dm, structNames, currentFunc, staticMaps);
+        var conv = transformDecl(dm, structNames, structFields, currentFunc, staticMaps);
+        if (conv === null) {
+          // Declaracion multilinea: el ';' (o el cierre de llaves/parentesis)
+          // esta mas abajo.
+          // Ej:  const PasoEmote EMOTE_SI[] = { \n { 140, 140, 120 }, ...
+          //      int velocidad = constrain( \n  parametroEntero(...) \n );
+          var declText = line, jm = i;
+          while ((braceDelta(declText) > 0 || balance(declText) > 0) && jm + 1 < lines.length) {
+            jm++; declText += " " + lines[jm]; // en un solo renglon: las lineas
+          }                                     // consumidas quedan en blanco
+          var semi2 = indexOfTop(declText, ";");
+          if (semi2 > 0) {
+            var dmM = dm.slice();
+            dmM[6] = dm[6] + declText.slice(line.length);
+            conv = transformDecl(dmM, structNames, structFields, currentFunc, staticMaps);
+            if (conv !== null) {
+              out[i] = conv;
+              lineRefNames[i] = curRefNames;
+              for (var k2 = i + 1; k2 <= jm; k2++) out[k2] = "";
+              if (currentFunc && staticMaps[currentFunc]) out[i] = replaceIdentifiers(out[i], staticMaps[currentFunc]);
+              i = jm + 1;
+              continue;
+            }
+          }
+        }
         if (conv !== null) {
-          out[i] = currentFunc && staticMaps[currentFunc] ? replaceIdentifiers(conv, staticMaps[currentFunc]) : conv;
+          out[i] = conv;
+          lineRefNames[i] = curRefNames;
+          if (currentFunc && staticMaps[currentFunc]) out[i] = replaceIdentifiers(out[i], staticMaps[currentFunc]);
           i++;
           continue;
         }
       }
       out[i] = line;
+      lineRefNames[i] = curRefNames;
       if (currentFunc && staticMaps[currentFunc]) {
         out[i] = replaceIdentifiers(out[i], staticMaps[currentFunc]);
       }
       if (currentFunc) {
         funcDepth += braceDelta(line);
-        if (funcDepth <= 0) { currentFunc = null; funcDepth = 0; }
+        if (funcDepth <= 0) { currentFunc = null; funcDepth = 0; curRefNames = null; }
       }
       i++;
     }
 
+    // Parametros por referencia (#4). Orden por linea:
+    //  1. dentro del cuerpo del callee, los usos directos pasan por ".v":
+    //       pedido.indexOf(...) -> pedido.v.indexOf(...)
+    //  2. llamadas a funciones con refs: se envuelve el argumento y se copia
+    //     de vuelta el resultado:
+    //       x = f(a, ref) ->  var __refN = __ref(ref.v); x = f(a, __refN); ...
+    //     Un arg ya convertido a "x.v" se trata como un lvalue mas: el callee
+    //     recibe un wrapper fresco y el write-back devuelve el valor al
+    //     wrapper del ambito (mismo objeto que la variable original).
+    var rewriteRefCalls = makeRefCallRewriter(refFuncs);
+    for (var rc = 0; rc < out.length; rc++) {
+      if (lineRefNames[rc]) {
+        out[rc] = rewriteRefUses(out[rc], lineRefNames[rc]);
+      }
+      out[rc] = rewriteRefCalls(out[rc], lineRefNames[rc]);
+    }
+
     var code = out.join("\n");
+
+    // sizeof(A) / sizeof(A[0])  ->  A.length   (#3)
+    code = code.replace(
+      /\bsizeof\s*\(\s*([A-Za-z_]\w*)\s*\)\s*\/\s*sizeof\s*\(\s*\1\s*\[\s*0\s*\]\s*\)/g,
+      "$1.length");
+    // sizeof(A) / sizeof(Tipo)  ->  A.length   (patron clasico de conteo)
+    var typeAlts = BUILTIN.concat(LIB_TYPES, Object.keys(knownTypes)).map(esc).join("|");
+    code = code.replace(new RegExp(
+      "\\bsizeof\\s*\\(\\s*([A-Za-z_]\\w*)\\s*\\)\\s*/\\s*sizeof\\s*\\(\\s*(?:(?:struct|class)\\s+)?(?:" + typeAlts + ")\\s*\\)", "g"),
+      "$1.length");
+    // Otros sizeof quedan para el runtime (arrays -> length).
+
+    // NULL / nullptr -> null  (#6), fuera de strings.
+    code = replaceOutsideStrings(code, /\b(NULL|nullptr)\b/g, function () { return "null"; });
+
+    // Constructores de librerias usados como expresion: clienteActual = WiFiClient();
+    // En C++ llama al constructor; en JS hace falta "new".
+    // (WiFiClient() sin argumentos = cliente desconectado = falsy: se deja
+    // en null para que "if (!client)" del patron clasico siga funcionando.)
+    code = replaceOutsideStrings(code,
+      /(^|[^A-Za-z0-9_$.])(new\s+)?\bWiFiClient\s*\(\s*\)/g,
+      function (m, pre, nw) { return nw ? m : pre + "null"; });
+    var libNames2 = LIB_TYPES.filter(function (t) { return t !== "WiFiClient"; }).join("|");
+    var libCtorRe = new RegExp(
+      "(^|[^A-Za-z0-9_$.])(new\\s+)?\\b(" + libNames2 + ")\\s*\\(", "g");
+    code = replaceOutsideStrings(code, libCtorRe, function (m, pre, nw, ty) {
+      if (nw) return m;
+      return pre + "new " + ty + "(";
+    });
+
     // String.length()  ->  .length
     code = code.replace(/\.length\s*\(\s*\)/g, ".length");
     code = code.replace(/\b([A-Za-z_]\w*)\.toLowerCase\s*\(\s*\)\s*;/g, "$1 = String($1).toLowerCase();");
@@ -397,9 +601,9 @@
   function replaceIdentifiers(line, map) {
     var names = Object.keys(map || {});
     if (!names.length) return line;
-    var re = new RegExp("(^|[^A-Za-z0-9_$.])(" + names.map(esc).join("|") + ")\\b(?!\\s*:)", "g");
-    return replaceOutsideStrings(line, re, function (m, pre, name) {
-      return pre + (map[name] || name);
+    var re = new RegExp("(?<![A-Za-z0-9_$.])(" + names.map(esc).join("|") + ")\\b(?!\\s*:)", "g");
+    return replaceOutsideStrings(line, re, function (m, name) {
+      return map[name] || name;
     });
   }
 
@@ -434,21 +638,173 @@
     return out;
   }
 
+  // Usos de un parametro por referencia DENTRO del cuerpo de su funcion:
+  // el parametro llega como wrapper { v: valor }, asi que toda lectura o
+  // asignacion pasa por ".v" (#4).  "valido = false;" -> "valido.v = false;"
+  function rewriteRefUses(line, names) {
+    var re = new RegExp(
+      "(?<![A-Za-z0-9_$.])(" + names.map(esc).join("|") + ")\\b(?!\\s*\\.v)", "g");
+    return replaceOutsideStrings(line, re, function (m, nm) {
+      return nm + ".v";
+    });
+  }
+
+  // ".v" sobre el cuerpo de una firma que viene en la misma linea:
+  // solo la parte posterior al cierre de los parametros.
+  function applyRefInBody(first, names) {
+    var openIdx = first.indexOf("(");
+    var closeIdx = matchParen(first, openIdx);
+    if (closeIdx < 0) return first;
+    return first.slice(0, closeIdx + 1) +
+      rewriteRefUses(first.slice(closeIdx + 1), names);
+  }
+
+  // Reescritura de una EXPRESION anidada. El copy-back de lvalues lo resuelve
+  // makeRefCallRewriter con una IIFE async; aca se cubren argumentos anidados.
+  // Los argumentos que ya son wrappers (params por referencia del ambito)
+  // se pasan tal cual: comparten el objeto y las mutaciones se propagan solas.
+  function makeExprRefRewriter(refFuncs) {
+    var names = Object.keys(refFuncs);
+    if (!names.length) return null;
+    var argRe = new RegExp(
+      "(?<![A-Za-z0-9_$.])(" + names.map(esc).join("|") + ")\\s*\\(", "g");
+    function rewrite(expr, refNamesAtLine) {
+      argRe.lastIndex = 0;
+      var mm, outParts = [], last = 0;
+      while ((mm = argRe.exec(expr))) {
+        var nameStart = mm.index; // con lookbehind no hay grupo antes del nombre
+        var before = expr.slice(0, mm.index);
+        if (/\bfunction\s*$/.test(before)) continue;
+        var openIdx = expr.indexOf("(", nameStart);
+        var closeIdx = matchParen(expr, openIdx);
+        if (closeIdx < 0) break;                    // multilinea: no se toca
+        outParts.push(expr.slice(last, mm.index));
+        var info = refFuncs[mm[1]];
+        var args = splitTop(expr.slice(openIdx + 1, closeIdx), ",");
+        for (var w = 0; w < info.indices.length; w++) {
+          var ai = info.indices[w];
+          if (ai >= args.length) continue;
+          var a = args[ai].trim();
+          if (!a) continue;
+          if (refNamesAtLine && refNamesAtLine.indexOf(a) >= 0) continue;
+          if (/^__ref\(.*\)$/.test(a)) continue;    // ya envuelto
+          args[ai] = "__ref(" + rewrite(a, refNamesAtLine) + ")";
+        }
+        outParts.push(mm[1] + "(" + args.join(",") + ")");
+        last = closeIdx + 1;
+        argRe.lastIndex = last;
+      }
+      if (!outParts.length) return expr;
+      outParts.push(expr.slice(last));
+      return outParts.join("");
+    }
+    return rewrite;
+  }
+
+  // Lado llamador de los parametros por referencia (#4). Por linea:
+  //  - llamadas en SENTENCIA (asignacion o llamada suelta terminada en ';'):
+  //    se envuelve con una variable temporal y se copia de vuelta:
+  //      var __refN = __ref(arg); x = f(a, __refN); arg = __refN.v;
+  //  - llamadas en EXPRESION (dentro de una condicion, de otro argumento...):
+  //    una IIFE async conserva el resultado y copia los lvalues de vuelta.
+  // Los argumentos que ya son wrappers (refs del ambito exterior) no se
+  // envuelven: al ser el mismo objeto, las mutaciones del callee se propagan.
+  function makeRefCallRewriter(refFuncs) {
+    var exprRewrite = makeExprRefRewriter(refFuncs);
+    var names = Object.keys(refFuncs);
+    if (!names.length) return function (line) { return line; };
+    var counter = 0;
+    var callRe = new RegExp(
+      "(?<![A-Za-z0-9_$.])(" + names.map(esc).join("|") + ")\\s*\\(", "g");
+    return function (line, refNamesAtLine) {
+      callRe.lastIndex = 0;
+      var mm;
+      while ((mm = callRe.exec(line))) {
+        var nameStart = mm.index;
+        var before = line.slice(0, nameStart);
+        if (/\bfunction\s*$/.test(before)) continue; // definicion, no llamada
+        if (/\bnew\s*$/.test(before)) continue;
+        var openIdx = line.indexOf("(", nameStart);
+        var closeIdx = matchParen(line, openIdx);
+        if (closeIdx < 0) break;                     // llamada multilinea
+        var info = refFuncs[mm[1]];
+        var args = splitTop(line.slice(openIdx + 1, closeIdx), ",");
+        var stmtCtx = /^\s*;/.test(line.slice(closeIdx + 1));
+        var wraps = [], unwraps = [], changed = false;
+        for (var w = 0; w < info.indices.length; w++) {
+          var ai = info.indices[w];
+          if (ai >= args.length) continue;
+          var a = args[ai].trim();
+          if (!a) continue;
+          if (/^__ref\(.*\)$/.test(a)) continue;     // ya envuelto
+          if (stmtCtx && /^[A-Za-z_]\w*(\.[A-Za-z_]\w*|\[[^\[\]]+\])?$/.test(a)) {
+            var vname = "__ref" + (++counter);
+            args[ai] = vname;
+            wraps.push("var " + vname + " = __ref(" + a + ");");
+            unwraps.push(a + " = " + vname + ".v;");
+            changed = true;
+          } else {
+            args[ai] = "__ref(" + (exprRewrite ? exprRewrite(a, refNamesAtLine) : a) + ")";
+            changed = true;
+          }
+        }
+        if (!changed) continue;
+        var continueScan = false;
+        if (stmtCtx) {
+          var st = nameStart - 1;
+          while (st >= 0 && ";{}".indexOf(line.charAt(st)) < 0) st--;
+          var stmtStart = st + 1;
+          line = line.slice(0, stmtStart) + wraps.join(" ") +
+            line.slice(stmtStart, nameStart) + mm[1] + "(" + args.join(",") + ")" +
+            line.slice(closeIdx + 1) + unwraps.join(" ");
+        } else {
+          var exprWraps = [], exprUnwraps = [];
+          for (var ew = 0; ew < info.indices.length; ew++) {
+            var eai = info.indices[ew];
+            if (eai >= args.length) continue;
+            var original = splitTop(line.slice(openIdx + 1, closeIdx), ",")[eai].trim();
+            if (!/^[A-Za-z_]\w*(\.[A-Za-z_]\w*|\[[^\[\]]+\])?$/.test(original)) continue;
+            var evname = "__ref" + (++counter);
+            args[eai] = evname;
+            exprWraps.push("var " + evname + " = __ref(" + original + ");");
+            exprUnwraps.push(original + " = " + evname + ".v;");
+          }
+          if (exprWraps.length) {
+            var retname = "__refResult" + counter;
+            var wrapped = "(await (async function(){" + exprWraps.join(" ") +
+              " var " + retname + " = await " + mm[1] + "(" + args.join(",") + "); " +
+              exprUnwraps.join(" ") + " return " + retname + ";})())";
+            line = line.slice(0, nameStart) + wrapped + line.slice(closeIdx + 1);
+            callRe.lastIndex = nameStart + wrapped.length;
+            continueScan = true;
+          } else {
+            line = line.slice(0, nameStart) + mm[1] + "(" + args.join(",") + ")" +
+              line.slice(closeIdx + 1);
+          }
+        }
+        if (continueScan) continue;
+        break;
+      }
+      return line;
+    };
+  }
+
   function insertAwaitsInFunctions(code, names) {
     if (!names.length) return code;
-    var callRe = new RegExp("(^|[^a-zA-Z0-9_$.])\\b(" + names.join("|") + ")\\s*\\(", "g");
+    // Lookbehind (no consume): "(" antes de una llamada no impide matchear la
+    // siguiente, p.ej. outer(inner(...)) -> ambos reciben await (#10/#12).
+    var callRe = new RegExp("(?<![A-Za-z0-9_$.])(" + names.join("|") + ")\\s*\\(", "g");
     var lines = code.split("\n");
     var depth = 0;
     for (var i = 0; i < lines.length; i++) {
       var startsFunc = /\basync\s+function\b/.test(lines[i]);
       if (depth > 0 || startsFunc) {
-        lines[i] = replaceOutsideStrings(lines[i], callRe, function (m, pre, name, offset, full) {
-          var nameStart = offset + pre.length;
-          var before = full.slice(0, nameStart);
+        lines[i] = replaceOutsideStrings(lines[i], callRe, function (m, name, offset, full) {
+          var before = full.slice(0, offset);
           if (/\bfunction\s*$/.test(before)) return m;
           if (/\bnew\s*$/.test(before)) return m;
           if (/\bawait\s*$/.test(before)) return m;
-          return pre + "await " + name + "(";
+          return "await " + name + "(";
         });
       }
       if (depth > 0 || startsFunc) depth += braceDelta(lines[i]);
@@ -614,7 +970,7 @@
     return "0";
   }
 
-  function transformDecl(dm, structNames, currentFunc, staticMaps) {
+  function transformDecl(dm, structNames, structFields, currentFunc, staticMaps) {
     var indent = dm[1];
     var mods = dm[2] || "";
     var base = dm[3];
@@ -627,8 +983,11 @@
     var tail = decls.slice(semi + 1); // normalmente ""
 
     var isConst = /\bconst\b/.test(mods);
+    // "const char *p" es puntero-a-constante: el binding sigue siendo mutable
+    // en JS. Solo un const real (sin '*') se vuelve const de JS (#5).
+    var isPointer = /\*/.test(dm[5] || "") || /\*/.test(declPart);
     var isStatic = /\bstatic\b/.test(mods);
-    var kw = isConst ? "const" : "let";
+    var kw = (isConst && !isPointer) ? "const" : "let";
     var staticNames = [];
 
     var parts = splitTop(declPart, ",").map(function (d) {
@@ -640,13 +999,23 @@
         var nm = am[1], dims = am[2], init = am[3];
         if (init) {
           var rhs = init.replace(/^=\s*/, "");
-          rhs = rhs.replace(/\{/g, "[").replace(/\}/g, "]"); // init de array -> JS
+          if (structNames[base]) {
+            // init agregado de structs: {..} / {{..},{..}} -> objetos con campos (#2)
+            rhs = structInitToJS(rhs, structFields[base]);
+          } else {
+            rhs = rhs.replace(/\{/g, "[").replace(/\}/g, "]"); // init de array -> JS
+          }
           return nm + " = " + rhs;
         }
         // sin init: new Array(N).fill(0) (1D); multi-dim -> anidado simple
         var sizes = [];
         dims.replace(/\[([^\]]*)\]/g, function (mm, s) { sizes.push(s.trim()); return ""; });
-        return nm + " = " + buildArray(sizes, 0, structNames[base]);
+        return nm + " = " + buildArray(sizes, 0, structNames[base] ? base : null);
+      }
+      // struct con init agregado:  Tipo x = {a, b, c};  (#2)
+      var sm2 = d.match(/^([A-Za-z_]\w*)\s*=\s*([\s\S]+)$/);
+      if (sm2 && structNames[base] && /^\s*\{/.test(sm2[2])) {
+        return sm2[1] + " = " + structInitToJS(sm2[2], structFields[base]);
       }
       // forma constructor: name(args)  -> new Tipo(args) si es clase/lib
       var cm = d.match(/^([A-Za-z_]\w*)\s*\(([\s\S]*)\)\s*$/);
@@ -661,7 +1030,11 @@
       }
       // clase/lib sin constructor explicito: Servo s; / Foo f;
       if (LIB_TYPES.indexOf(base) >= 0 && /^[A-Za-z_]\w*$/.test(d)) {
-        return d + " = new " + base + "()";
+        // WiFiClient v/s: el patron Arduino clasico es "if (!client) { client =
+        // server.available(); }". Un objecto nuevo es SIEMPRE truthy en JS y
+        // el pedido nunca se tomaba. Se inicializa en null (falsy) igual que
+        // un WiFiClient recien construido en C++.
+        return d + " = " + (base === "WiFiClient" ? "null" : "new " + base + "()");
       }
       if (isStatic) {
         var sm = d.match(/^([A-Za-z_]\w*)\s*(?:=\s*([\s\S]+))?$/);
@@ -687,11 +1060,11 @@
     return indent + kw + " " + parts.join(", ") + ";" + tail;
   }
 
-  function buildArray(sizes, idx, isStruct) {
-    if (idx >= sizes.length) return isStruct ? "{}" : "0";
+  function buildArray(sizes, idx, structBase) {
+    if (idx >= sizes.length) return structBase ? "__make_" + structBase + "()" : "0";
     var n = sizes[idx];
     if (!n) return "[]";
-    var inner = buildArray(sizes, idx + 1, isStruct);
+    var inner = buildArray(sizes, idx + 1, structBase);
     return "Array.from({ length: " + n + " }, function(){ return " + inner + "; })";
   }
 

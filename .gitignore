@@ -17,3 +17,7 @@ profe/
 server.log
 server80.log
 *.log
+
+# Cache local de Python
+__pycache__/
+*.py[cod]
